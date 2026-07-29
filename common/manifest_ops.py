@@ -1,4 +1,4 @@
-import json
+import json, boto3
 # {
 #     "id": "95acc994-d2f5-40a8-8ea1-fe873eccf4a5",
 #     "dry_file": "/Users/owenmeyer/dsp-modeler/black-box/data/input/input.wav",
@@ -81,17 +81,36 @@ def repath_manifest(
         origin_prefix,#='/Users/owenmeyer/dsp-modeler/black-box/',
         destination_prefix#='s3://omm-test-bucket/dsp-modeler/'
 ):
-    with open(manifest_origin, 'r') as fin, open(manifest_destination, 'w') as fout:
-        for line in fin:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)
+    def _parse_s3_uri(uri):
+        bucket, key = uri[len('s3://'):].split('/', 1)
+        return bucket, key
+    def read_manifest_lines(path):
+        if path.startswith('s3://'):
+            bucket, key = _parse_s3_uri(path)
+            body = boto3.client('s3').get_object(Bucket=bucket, Key=key)['Body'].read()
+            return body.decode().splitlines()
+        with open(path, 'r') as f:
+            return f.readlines()
+    def write_manifest_lines(path, lines):
+        content = '\n'.join(lines) + '\n'
+        if path.startswith('s3://'):
+            bucket, key = _parse_s3_uri(path)
+            boto3.client('s3').put_object(Bucket=bucket, Key=key, Body=content.encode())
+        else:
+            with open(path, 'w') as f:
+                f.write(content)
 
-            record['dry_file'] = destination_prefix + record['dry_file'][len(origin_prefix):] if record['dry_file'].startswith(origin_prefix) else record['dry_file']
-            record['wet_file'] = destination_prefix + record['wet_file'][len(origin_prefix):] if record['wet_file'].startswith(origin_prefix) else record['wet_file']
-            fout.write(json.dumps(record) + '\n')
-        print(f"Wrote {manifest_origin}")
+    out_lines = []
+    for line in read_manifest_lines(manifest_origin):
+        line = line.strip()
+        if not line:
+            continue
+        record = json.loads(line)
+        record['dry_file'] = destination_prefix + record['dry_file'][len(origin_prefix):] if record['dry_file'].startswith(origin_prefix) else record['dry_file']
+        record['wet_file'] = destination_prefix + record['wet_file'][len(origin_prefix):] if record['wet_file'].startswith(origin_prefix) else record['wet_file']
+        out_lines.append(json.dumps(record))
+    write_manifest_lines(manifest_destination, out_lines)
+    print(f"Wrote {manifest_destination}")
 
 
 def get_existing_params():
@@ -112,7 +131,15 @@ def get_existing_params():
 
 #print(get_all_dict_params())
 
-e, n =get_existing_params()
+# e, n =get_existing_params()
 
-#print(n)
-print_table(n)
+# #print(n)
+# print_table(n)
+
+
+repath_manifest(
+        manifest_origin='/Users/owenmeyer/dsp-modeler/data/outputs/manifest.jsonl',
+        manifest_destination='/Users/owenmeyer/dsp-modeler/data/outputs/manifest-2.jsonl',
+        origin_prefix='/Users/owenmeyer/dsp-modeler/black-box/data/',
+        destination_prefix='/Users/owenmeyer/dsp-modeler/data/'
+)
