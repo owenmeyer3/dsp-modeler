@@ -75,6 +75,25 @@ def get_all_dict_params():
                 a.append(r3)
     return a
 
+def repath_manifest(
+        manifest_origin,#='/Users/owenmeyer/dsp-modeler/data/outputs/manifest.jsonl',
+        manifest_destination,#='/Users/owenmeyer/dsp-modeler/data/outputs/s3_manifest.jsonl',
+        origin_prefix,#='/Users/owenmeyer/dsp-modeler/black-box/',
+        destination_prefix#='s3://omm-test-bucket/dsp-modeler/'
+):
+    with open(manifest_origin, 'r') as fin, open(manifest_destination, 'w') as fout:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+
+            record['dry_file'] = destination_prefix + record['dry_file'][len(origin_prefix):] if record['dry_file'].startswith(origin_prefix) else record['dry_file']
+            record['wet_file'] = destination_prefix + record['wet_file'][len(origin_prefix):] if record['wet_file'].startswith(origin_prefix) else record['wet_file']
+            fout.write(json.dumps(record) + '\n')
+        print(f"Wrote {manifest_origin}")
+
+
 def get_existing_params():
     dps = get_all_dict_params()
     rps=[]
