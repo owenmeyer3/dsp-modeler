@@ -1,0 +1,9 @@
+I have a guitar pedal I am trying to match digital signal processing with 3 knobs ("Distortion","Filter","Volume"). For now i will be omitting "Volume" and we can add later if needed
+
+I'd like to send you some samples with each "Distortion" and "Filter" set to 1 of 7 positions (we cal call the positions 0,1,2,3,4,5 and 6). So 49 permutations total given each of the 2 controls has 7 positions.
+
+From there, I'm hoping you can write some logic for the signal processing that would fit into my juce library.
+
+What types of things should we consider? Is it feasable? 
+
+The first thing I can think of is that it may matter whether Distortion or Filter is the first control in a series type signal flow. Does that matter if you were examining this for me?
