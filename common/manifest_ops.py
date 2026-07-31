@@ -1,20 +1,5 @@
-import json, boto3
-# {
-#     "id": "95acc994-d2f5-40a8-8ea1-fe873eccf4a5",
-#     "dry_file": "/Users/owenmeyer/dsp-modeler/black-box/data/input/input.wav",
-#     "wet_file": "/Users/owenmeyer/dsp-modeler/black-box/data/outputs/95acc994-d2f5-40a8-8ea1-fe873eccf4a5.wav",
-#     "sample_rate": 96000,
-#     "duration_sec": 244.0,
-#     "peak_dbfs": -4.63,
-#     "clipped_samples": 0,
-#     "estimated_latency_samples": 5394,
-#     "captured_at": "2026-07-27T17:42:24",
-#     "params": {
-#         "d": 4.0,
-#         "f": 4.0,
-#         "v": 7.0
-#     }
-# }
+import json, boto3, os
+from common.utils import parse_s3_uri
 
 def flatten_record(record):
     flat = {k: v for k, v in record.items() if k != "params"}
@@ -23,7 +8,7 @@ def flatten_record(record):
     return flat
 
 def get_jsonl_records(flatten=False):
-    with open('/Users/owenmeyer/dsp-modeler/black-box/data/outputs/manifest.jsonl', 'r') as f:
+    with open('/home/ubuntu/dsp-modeler/black-box/data/outputs/manifest.jsonl', 'r') as f:
         rows = []
         for line in f:
             line = line.strip()
@@ -75,18 +60,28 @@ def get_all_dict_params():
                 a.append(r3)
     return a
 
+def get_existing_params():
+    dps = get_all_dict_params()
+    rps=[]
+    nps=[]
+    for dp in dps:
+        try:
+            d=get_records_by_params(dp)
+            rps.append(dp)
+        except:
+            nps.append(dp)
+    return [rps, nps]
+
+
 def repath_manifest(
         manifest_origin,#='/Users/owenmeyer/dsp-modeler/data/outputs/manifest.jsonl',
         manifest_destination,#='/Users/owenmeyer/dsp-modeler/data/outputs/s3_manifest.jsonl',
         origin_prefix,#='/Users/owenmeyer/dsp-modeler/black-box/',
         destination_prefix#='s3://omm-test-bucket/dsp-modeler/'
 ):
-    def _parse_s3_uri(uri):
-        bucket, key = uri[len('s3://'):].split('/', 1)
-        return bucket, key
     def read_manifest_lines(path):
         if path.startswith('s3://'):
-            bucket, key = _parse_s3_uri(path)
+            bucket, key = parse_s3_uri(path)
             body = boto3.client('s3').get_object(Bucket=bucket, Key=key)['Body'].read()
             return body.decode().splitlines()
         with open(path, 'r') as f:
@@ -94,7 +89,7 @@ def repath_manifest(
     def write_manifest_lines(path, lines):
         content = '\n'.join(lines) + '\n'
         if path.startswith('s3://'):
-            bucket, key = _parse_s3_uri(path)
+            bucket, key = parse_s3_uri(path)
             boto3.client('s3').put_object(Bucket=bucket, Key=key, Body=content.encode())
         else:
             with open(path, 'w') as f:
@@ -112,18 +107,22 @@ def repath_manifest(
     write_manifest_lines(manifest_destination, out_lines)
     print(f"Wrote {manifest_destination}")
 
+def download_s3_prefix(bucket, prefix, local_dir='/home/ubuntu/dsp-modeler/data'):
+    s3 = boto3.client('s3')
+    paginator = s3.get_paginator('list_objects_v2')
 
-def get_existing_params():
-    dps = get_all_dict_params()
-    rps=[]
-    nps=[]
-    for dp in dps:
-        try:
-            d=get_records_by_params(dp)
-            rps.append(dp)
-        except:
-            nps.append(dp)
-    return [rps, nps]
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            if key.endswith('/'):
+                continue  # directory marker, not a real object
+
+            rel_path = key[len(prefix):].lstrip('/')
+            dest_path = os.path.join(local_dir, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+            print(f"{key} -> {dest_path}")
+            s3.download_file(bucket, key, dest_path)
 
 #print_table(get_jsonl_records(), ['wet_file', 'params_d', 'params_f', 'params_v'])
 
@@ -131,15 +130,16 @@ def get_existing_params():
 
 #print(get_all_dict_params())
 
-# e, n =get_existing_params()
+# e, n = get_existing_params()
 
-# #print(n)
+# print(n)
 # print_table(n)
 
 
 repath_manifest(
-        manifest_origin='/Users/owenmeyer/dsp-modeler/data/outputs/manifest.jsonl',
-        manifest_destination='/Users/owenmeyer/dsp-modeler/data/outputs/manifest-2.jsonl',
-        origin_prefix='/Users/owenmeyer/dsp-modeler/black-box/data/',
-        destination_prefix='/Users/owenmeyer/dsp-modeler/data/'
+    manifest_origin='/home/ubuntu/dsp-modeler/black_box/data/train/manifest.jsonl',
+    manifest_destination='/home/ubuntu/dsp-modeler/black_box/data/train/manifest.jsonl',
+    origin_prefix='/Users/owenmeyer/dsp-modeler/black-box/data/',
+    destination_prefix='/home/ubuntu/dsp-modeler/data/'
 )
+# download_s3_prefix('omm-test-bucket', 'dsp-modeler/data', local_dir='/home/ubuntu/dsp-modeler/data')

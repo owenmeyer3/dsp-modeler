@@ -20,6 +20,7 @@ reshaping even though its harmonic content doesn't.
 """
 import numpy as np
 from scipy import signal
+from common.cfg import get_config
 
 
 def find_onsets(dry, sr, n_onsets=5, min_spacing_seconds=5.0, block_seconds=0.02):
@@ -98,7 +99,7 @@ def _densest_low_cluster(lags, cluster_window, min_frac):
 
 def estimate_shift(dry, wet, sr, n_onsets=20, min_spacing_seconds=3.0,
                     window_seconds=0.4, preroll_seconds=0.05,
-                    max_lag_seconds=0.06, cluster_window_seconds=0.0006,
+                    max_lag_seconds=1.0, cluster_window_seconds=0.0006,
                     cluster_min_frac=0.25):
     """Estimate the fixed sample shift to apply to `wet` (relative to `dry`)
     for this particular file.

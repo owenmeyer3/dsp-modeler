@@ -21,16 +21,12 @@ import argparse
 import json
 
 import boto3
-
-
-def _parse_s3_uri(uri):
-    bucket, key = uri[len('s3://'):].split('/', 1)
-    return bucket, key
+from common import parse_s3_uri
 
 
 def read_manifest_lines(path):
     if path.startswith('s3://'):
-        bucket, key = _parse_s3_uri(path)
+        bucket, key = parse_s3_uri(path)
         body = boto3.client('s3').get_object(Bucket=bucket, Key=key)['Body'].read()
         return body.decode().splitlines()
     with open(path, 'r') as f:
@@ -40,7 +36,7 @@ def read_manifest_lines(path):
 def write_manifest_lines(path, lines):
     content = '\n'.join(lines) + '\n'
     if path.startswith('s3://'):
-        bucket, key = _parse_s3_uri(path)
+        bucket, key = parse_s3_uri(path)
         boto3.client('s3').put_object(Bucket=bucket, Key=key, Body=content.encode())
     else:
         with open(path, 'w') as f:
@@ -66,16 +62,16 @@ def transform_manifest(input_path, output_path, origin_prefix, dest_prefix):
     write_manifest_lines(output_path, out_lines)
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input', required=True, help='Path to the source manifest.jsonl (local path or s3:// URI)')
-    parser.add_argument('--output', required=True, help='Path to write the transformed manifest.jsonl (local path or s3:// URI)')
-    parser.add_argument('--origin-prefix', required=True, help='Prefix to replace (local path or s3:// URI)')
-    parser.add_argument('--dest-prefix', required=True, help='Replacement prefix (local path or s3:// URI)')
-    args = parser.parse_args()
+# if __name__ == '__main__':
+#     parser = argparse.ArgumentParser(description=__doc__)
+#     parser.add_argument('--input', required=True, help='Path to the source manifest.jsonl (local path or s3:// URI)')
+#     parser.add_argument('--output', required=True, help='Path to write the transformed manifest.jsonl (local path or s3:// URI)')
+#     parser.add_argument('--origin-prefix', required=True, help='Prefix to replace (local path or s3:// URI)')
+#     parser.add_argument('--dest-prefix', required=True, help='Replacement prefix (local path or s3:// URI)')
+#     args = parser.parse_args()
 
-    transform_manifest(args.input, args.output, args.origin_prefix, args.dest_prefix)
-    print(f"Wrote {args.output}")
+#     transform_manifest(args.input, args.output, args.origin_prefix, args.dest_prefix)
+#     print(f"Wrote {args.output}")
 
 
 def repath_manifest(

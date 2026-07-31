@@ -1,1 +1,1 @@
-echo 'export PYTHONPATH="/Users/owenmeyer/dsp-modeler:$PYTHONPATH"' >> ~/.bash_profile
+echo 'export PYTHONPATH="/home/ubuntu/dsp-modeler:$PYTHONPATH"' >> ~/.bash_profile
