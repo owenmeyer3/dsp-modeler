@@ -51,71 +51,42 @@ from common.utils import load_wav
 config = get_config()
 
 
-# def align_to_dry(dry_full, other_full, shift):
-#     """Slice dry_full/other_full so other_full's content at sample t was
-#     recorded `shift` samples after dry_full's content at sample t."""
-#     if shift >= 0:
-#         other_al = other_full[shift:]
-#         dry_al = dry_full[:len(other_al)]
-#     else:
-#         dry_al = dry_full[-shift:]
-#         other_al = other_full[:len(dry_al)]
-#     n = min(len(dry_al), len(other_al))
-#     return dry_al[:n], other_al[:n]
+
 
 def evaluate_prediction(
-    dry_path = '/Users/owenmeyer/dsp-modeler/model_data/input.wav',
-    real_path = '/Users/owenmeyer/dsp-modeler/d-4_f-4_v-6.wav',
-    pred_path = '/Users/owenmeyer/dsp-modeler/outputs/pred_d-4_f-4_v-6.wav',
-    output_dir = '/Users/owenmeyer/dsp-modeler/outputs',
+    dry_path,
+    real_path,
+    pred_path,
+    output_dir,
     target_lufs = -23.0
-
 ):
-    # sr, dry_full = sc.load(dry_path)
-    # sr_r, real_full = sc.load(real_path)
-    # sr_p, pred_full = sc.load(pred_path)
-    dry_full, sr = load_wav(dry_path)
-    real_full, sr_r = load_wav(real_path)
-    pred_full, sr_p = load_wav(pred_path)
+    # wav to data
+    dry, sr = load_wav(dry_path)
+    real, sr_r = load_wav(real_path)
+    pred, sr_p = load_wav(pred_path)
+    n_trim = int(config['SILENT_LEADIN_SECONDS'] * sr) # selent sample count
     assert sr == sr_r == sr_p, "sample rate mismatch between dry/real/pred"
 
-    n_trim = int(config['SILENT_LEADIN_SECONDS'] * sr)
+    # make noiseless real data
+    print(f"dry {len(dry)}")
+    noise_profile = sc.estimate_noise_profile(real[:n_trim], sr) # pre-silence
+    real_dn = sc.spectral_subtract(real, noise_profile, sr)
+    print(f"real_dn {len(real_dn)}")
+    
 
-    # 1. Estimate the real capture's per-take latency using onset
-    #    detection on the post-lead-in (performance) region only, then
-    #    apply that same fixed shift across the FULL files -- the
-    #    physical latency is constant for the whole take.
-    # shift = estimate_shift(dry_full[n_trim:], real_full[n_trim:], sr)
-    shift, sr = measure_delay(
-        real_full[n_trim:],
-        dry_full[n_trim:],
-        sr,
-        n_onsets=20, # n strongest moments in the dry guitar recording where a note starts
-        n_candidates_per_onset=10,
-        window_seconds=0.4,
-        search_seconds=1.0,
-        preroll_seconds=0.05, # window starts X s before the detected onset
-        min_spacing_seconds=3.0, # time between onsets to keep from picking the same note played
-        cluster_window_seconds=0.02,
-        verbose=False,
-    )
-    print(shift)
+    # Shift real to match dry time-sync
+    shift, sr = measure_delay(real[n_trim:], dry[n_trim:], sr, verbose=False) # only post-silence
+    dry_aligned, real_aligned = apply_shift(dry, real, shift)
+    dry_aligned, real_dn_aligned = apply_shift(dry, real_dn, shift)
+    pred_aligned = pred[:len(dry_aligned)]
     print(f"real capture shift relative to dry: {shift} samples ({shift/sr*1000:.3f} ms)")
 
-    dry_aligned, real_aligned = apply_shift(dry_full, real_full, shift)
-    # dry_aligned, real_aligned = align_to_dry(dry_full, real_full, shift)
-    # pred shares dry_full's indexing exactly (no physical round trip),
-    # so it gets the same slice dry_aligned came from
-    pred_aligned = pred_full[:len(dry_aligned)]
-
-    n = min(len(real_aligned), len(pred_aligned))
-    real_aligned, pred_aligned = real_aligned[:n], pred_aligned[:n]
-
-    # 2. restrict to the meaningful (post-lead-in) performance region for
-    #    all quantitative comparisons
-    dry_eval = dry_aligned[n_trim:]
-    real_eval = real_aligned[n_trim:]
-    pred_eval = pred_aligned[n_trim:]
+    # evaluate only length of samples existing after shift
+    n = min(len(dry_aligned), len(real_aligned))
+    dry_eval = dry_aligned[:n]
+    real_eval = real_aligned[:n]
+    real_dn_eval = real_dn_aligned[:n]
+    pred_eval = pred_aligned[:n]
 
     print(f'min {pred_eval.min()}')
     print(f'max {pred_eval.max()}')
@@ -125,41 +96,61 @@ def evaluate_prediction(
     # --- ESR / DC (same formula as training loss) ---
     dry_t = torch.from_numpy(dry_eval).float().unsqueeze(0).unsqueeze(-1)
     real_t = torch.from_numpy(real_eval).float().unsqueeze(0).unsqueeze(-1)
+    real_dn_t = torch.from_numpy(real_dn_eval).float().unsqueeze(0).unsqueeze(-1)
     pred_t = torch.from_numpy(pred_eval).float().unsqueeze(0).unsqueeze(-1)
-    esr = esr_loss(pred_t, real_t).item()
-    dc = dc_loss(pred_t, real_t).item()
-    print(f"\nESR (held-out, v=6): {esr:.5f}")
-    print(f"DC loss: {dc:.6f}")
+    print("\nReal")
+    print(f"ESR (held-out, v=6): {esr_loss(pred_t, real_t).item():.5f}")
+    print(f"DC loss: {dc_loss(pred_t, real_t).item():.6f}")
+    print("\nReal Denoised")
+    print(f"ESR (held-out, v=6): {esr_loss(pred_t, real_dn_t).item():.5f}")
+    print(f"DC loss: {dc_loss(pred_t, real_dn_t).item():.6f}")
 
     # --- LUFS-matched null test (reusing spectral_compare.py's tooling) ---
     real_noise_floor = sc.measure_noise_floor(real_eval, sr)
+    real_dn_noise_floor = sc.measure_noise_floor(real_dn_eval, sr)
     pred_noise_floor = sc.measure_noise_floor(pred_eval, sr)
+    dry_noise_floor = sc.measure_noise_floor(dry_eval, sr)
+
     real_gate = real_noise_floor + 10
+    real_dn_gate = real_dn_noise_floor + 10
     pred_gate = pred_noise_floor + 10
+    dry_gate = dry_noise_floor + 10
+
     real_lufs = sc.integrated_level(real_eval, sr, real_gate)
+    real_dn_lufs = sc.integrated_level(real_dn_eval, sr, real_dn_gate)
     pred_lufs = sc.integrated_level(pred_eval, sr, pred_gate)
+    dry_lufs = sc.integrated_level(dry_eval, sr, dry_gate)
 
     real_norm = real_eval * 10 ** ((target_lufs - real_lufs) / 20)
+    real_dn_norm = real_dn_eval * 10 ** ((target_lufs - real_dn_lufs) / 20)
     pred_norm = pred_eval * 10 ** ((target_lufs - pred_lufs) / 20)
-    dry_norm = dry_eval * 10 ** ((target_lufs - pred_lufs) / 20)
+    dry_norm = dry_eval * 10 ** ((target_lufs - dry_lufs) / 20)
 
-    nt = sc.null_test(real_norm, pred_norm, sr)
-    print(f"\nLUFS-matched null test (target {target_lufs} LUFS):")
-    print(f"  real: noise_floor={real_noise_floor:.2f} LUFS, integrated={real_lufs:.2f} LUFS")
-    print(f"  pred: noise_floor={pred_noise_floor:.2f} LUFS, integrated={pred_lufs:.2f} LUFS")
-    print(f"  residual: {nt['residual_pct']:.1f}% ({nt['residual_db']:.2f} dB)")
-    print(f"  (extra lag null_test's own internal alignment found: "
-          f"{nt['lag_samples']} samples -- should be near zero if our shift was already correct)")
+    # nt = sc.null_test(real_norm, pred_norm, sr)
+    # print(f"\nLUFS-matched null test (target {target_lufs} LUFS):")
+    # print(f"  real: noise_floor={real_noise_floor:.2f} LUFS, integrated={real_lufs:.2f} LUFS")
+    # print(f"  pred: noise_floor={pred_noise_floor:.2f} LUFS, integrated={pred_lufs:.2f} LUFS")
+    # print(f"  residual: {nt['residual_pct']:.1f}% ({nt['residual_db']:.2f} dB)")
+    # print(f"  (extra lag null_test's own internal alignment found: "
+    #       f"{nt['lag_samples']} samples -- should be near zero if our shift was already correct)")
 
     # --- plots + band table ---
-    normalized = {'real_v6': real_norm, 'pred_v6': pred_norm, 'dry_v6': dry_norm}
     os.makedirs(output_dir, exist_ok=True)
-    sc.plot_spectrograms(normalized, sr, f'{output_dir}/eval_v6_spectrograms.png')
-    sc.plot_average_spectrum(normalized, sr, f'{output_dir}/eval_v6_avg_spectrum.png')
-    print(f"\nSaved {output_dir}/eval_v6_spectrograms.png and {output_dir}/eval_v6_avg_spectrum.png")
-    sc.print_band_table(normalized, sr, reference='real_v6')
+
+    normalized = {'real': real_norm, 'real_dn':real_dn_norm, 'pred': pred_norm, 'dry': dry_norm}
+    sc.plot_spectrograms(normalized, sr, f'{output_dir}/eval_norm_spectrograms.png', fmax=24000, vmin=-120)
+    sc.plot_average_spectrum(normalized, sr, f'{output_dir}/eval_norm_avg_spectrum.png')
+    print(f"\nSaved {output_dir}/eval_v6_spectrograms.png and {output_dir}/eval_avg_spectrum.png")
+    sc.print_band_table(normalized, sr, reference='real')
+
+    # --- raw (non-LUFS-matched) dB spectrum, for comparison ---
+    raw_signals = {'real': real_eval, 'real_dn': real_dn_eval, 'pred': pred_eval, 'dry': dry_eval}
+    sc.plot_spectrograms(raw_signals, sr, f'{output_dir}/eval_db_spectrograms.png', fmax=24000, vmin=-120)
+    sc_db.plot_average_spectrum(raw_signals, sr, f'{output_dir}/eval_db_avg_spectrum_db.png')
+    print(f"Saved {output_dir}/eval_avg_spectrum_db.png")
+
 
     # plot waves
-    waveform_out_path = f'{output_dir}/eval_v6_waveform.png'
+    waveform_out_path = f'{output_dir}/eval_waveform.png'
     plot_waveforms(normalized, sr, waveform_out_path, chunk_seconds=2, zoom_seconds=0.05)
     print(f"Saved {waveform_out_path}")

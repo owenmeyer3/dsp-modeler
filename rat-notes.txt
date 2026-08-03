@@ -24,9 +24,32 @@ hidden_size=20 may be too small to capture the fast nonlinear waveshaping needed
 ESR is a time-domain, broadband-energy-weighted loss — and high-frequency content is a tiny fraction of a distorted guitar signal's total energy, even when it's perceptually/harmonically important. The optimizer has little incentive to get that part right when it barely moves the overall loss number.
 Worth actually listening for this — dullness/lack of "sizzle" compared to the real pedal should be audible if this is as pronounced as the numbers suggest. Want to try increasing hidden_size, or look at adding a pre-emphasis/high-frequency-weighted term to the loss, as the next thing to test?
 
-Good news and a real, specific gap — let me walk through what these two images actually show, since they reconcile the "looks similar but ESR is bad" tension pretty cleanly.
-Waveform plot, top two panels: genuinely good. real_v6 and pred_v6 do look substantially similar — same overall envelope shape, same burst locations (the loud passages around t=0.75–1.0s and t=1.2–1.3s line up in both), similar amplitude range. This is real progress, consistent with the mean/std match you found in training.
-The zoomed overlay at the bottom, though, isn't showing what it looks like it's showing. dry_v6 was added to that plot at its raw, unnormalized scale (±10ish), while real_v6/pred_v6 are LUFS-matched down to ±0.2–0.3 — roughly 30-50x smaller. Plotted on shared axes, dry_v6's huge swings force the y-axis to accommodate ±10, which squashes both real_v6 (blue) and pred_v6 (orange) into a flat-looking line near zero — you can't even see blue separately from orange at that scale. That's a plotting artifact, not evidence that pred is flat; the top two panels already show it isn't. Worth giving dry_v6 its own axis (e.g. ax.twinx()) or dropping it from that specific overlay if you want to actually compare real vs. pred shape at a readable scale.
-The spectrum plot is where the real, quantifiable gap shows up. Below ~2kHz, real_v6 and pred_v6 track each other closely — matches your observation. But above roughly 2–5kHz, pred_v6 falls substantially below real_v6 and cuts off to the noise floor much earlier (steep drop-off well before 20kHz, versus real continuing with real energy further up). That's not new, either — it's the exact same high-frequency rolloff documented in rat-notes.txt from before this session started: "the model's output has become bit-exact zero above ~10-15kHz, while the real pedal still carries genuine energy... all the way to 45kHz." Same limitation, showing up again in this run.
-That reconciles the whole picture. ESR is a full-bandwidth, sample-by-sample metric — it doesn't care that the low end and overall envelope look convincing, it penalizes every sample of mismatch, including the missing high-frequency harmonic content the RAT's distortion genuinely produces. A real distorted guitar signal has meaningful energy spread across a wide band; systematically under-producing a chunk of that band is a real, substantial, consistent source of squared error — enough to keep ESR sitting around 1.5–2 even while the parts the model has learned (timing, envelope, low/mid-frequency content) look and would likely sound reasonably close.
-rat-notes.txt already named two candidate causes worth revisiting now that this is confirmed again: hidden_size=20 possibly being too small to represent the fast nonlinear waveshaping needed for full harmonic generation at 96kHz, and ESR itself being energy-weighted in a way that gives high-frequency content (a small fraction of total signal energy) little gradient incentive to get right. Given this exact gap has now shown up independently in two different training attempts, I'd treat it as the next concrete thing worth addressing — either bumping hidden_size or adding a frequency-weighted term to the loss — rather than continuing to chase the amplitude/mean-matching side, which looks like it's actually working now.
+Good news and a real, specific gap — let me walk through what these two images actually show, since they reconcile the 
+"looks similar but ESR is bad" tension pretty cleanly.
+
+Waveform plot, top two panels: genuinely good. real_v6 and pred_v6 do look substantially similar — same overall envelope shape, same burst locations 
+(the loud passages around t=0.75–1.0s and t=1.2–1.3s line up in both), similar amplitude range. This is real progress, consistent with the mean/std match you found in training.
+
+The zoomed overlay at the bottom, though, isn't showing what it looks like it's showing. dry_v6 was added to that plot at its raw, unnormalized scale (±10ish), 
+while real_v6/pred_v6 are LUFS-matched down to ±0.2–0.3 — roughly 30-50x smaller. Plotted on shared axes, dry_v6's huge swings force the y-axis to accommodate ±10, 
+which squashes both real_v6 (blue) and pred_v6 (orange) into a flat-looking line near zero — you can't even see blue separately from orange at that scale. 
+That's a plotting artifact, not evidence that pred is flat; the top two panels already show it isn't. 
+Worth giving dry_v6 its own axis (e.g. ax.twinx()) or dropping it from that specific overlay if you want to actually compare real vs. pred shape at a readable scale.
+
+The spectrum plot is where the real, quantifiable gap shows up. Below ~2kHz, real_v6 and pred_v6 track each other closely — matches your observation. 
+But above roughly 2–5kHz, pred_v6 falls substantially below real_v6 and cuts off to the noise floor much earlier (steep drop-off well before 20kHz, 
+versus real continuing with real energy further up). That's not new, either — it's the exact same high-frequency rolloff documented in rat-notes.txt from before this session started: 
+"the model's output has become bit-exact zero above ~10-15kHz, while the real pedal still carries genuine energy... all the way to 45kHz." Same limitation, 
+showing up again in this run.
+
+That reconciles the whole picture. ESR is a full-bandwidth, sample-by-sample metric — it doesn't care that the low end and overall envelope look convincing, 
+it penalizes every sample of mismatch, including the missing high-frequency harmonic content the RAT's distortion genuinely produces. 
+A real distorted guitar signal has meaningful energy spread across a wide band; systematically under-producing a chunk of that band is a real, 
+substantial, consistent source of squared error — enough to keep ESR sitting around 1.5–2 even while the parts the model has learned (timing, envelope, low/mid-frequency content) 
+look and would likely sound reasonably close.
+
+rat-notes.txt already named two candidate causes worth revisiting now that this is confirmed again: hidden_size=20 possibly being too small to represent 
+the fast nonlinear waveshaping needed for full harmonic generation at 96kHz, and ESR itself being energy-weighted in a way that gives high-frequency content 
+(a small fraction of total signal energy) little gradient incentive to get right. Given this exact gap has now shown up independently in two different training attempts, 
+I'd treat it as the next concrete thing worth addressing — either bumping hidden_size or adding a frequency-weighted term to the loss — rather than continuing to chase 
+the amplitude/mean-matching side, which looks like it's actually working now.

@@ -96,10 +96,7 @@ def cluster_by_onset_agreement(all_candidates, cluster_window):
     n_onsets_support, _, i, j = best
     cluster_lag = float(np.median(lags[i:j]))
     return cluster_lag, n_onsets_support, sorted_c[i:j]
-
-
-
-
+    
 def measure_delay(
     wet_data,
     dry_data,
@@ -186,13 +183,3 @@ def apply_shift(dry_data, wet_data, delay_samples):
 
     n = min(len(dry_al), len(wet_al))
     return dry_al[:n], wet_al[:n]
-
-    # delay_samples, sample_rate = measure_delay(
-    #     wet_path,
-    #     dry_path,
-    #     silent_leadin_seconds=8.0,
-    #     n_onsets=20,
-    #     search_seconds=1.0,
-    #     cluster_window_seconds=0.02,
-    #     verbose=True,
-    # )

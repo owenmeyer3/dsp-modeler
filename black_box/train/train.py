@@ -20,6 +20,7 @@ from black_box.model.model import ConditionedLSTM, make_conditioned_input, norma
 # from common.alignment import estimate_shift, apply_shift
 from common.delay_ops import measure_delay, apply_shift
 from common.utils import load_wav
+import eval.spectral_compare as sc
 
 class PedalDataset(torch.utils.data.Dataset):
     """Loads the single shared dry reference (DRY_FILENAME) once, then
@@ -68,23 +69,11 @@ class PedalDataset(torch.utils.data.Dataset):
             # preprocess
             wet_trim = wet_full[n_trim:]
 
-            delay_samples, sr = measure_delay(
-                wet_trim,
-                dry_trim,
-                sr,
-                n_onsets=20, # n strongest moments in the dry guitar recording where a note starts
-                n_candidates_per_onset=10,
-                window_seconds=0.4,
-                search_seconds=1.0,
-                preroll_seconds=0.05, # window starts X s before the detected onset
-                min_spacing_seconds=3.0, # time between onsets to keep from picking the same note played
-                cluster_window_seconds=0.02,
-                verbose=False,
-            )
+            delay_samples, sr = measure_delay(wet_trim, dry_trim, sr, verbose=False)
             dry_aligned, wet_aligned = apply_shift(dry_full, wet_full, delay_samples)
-
             n = len(dry_aligned)
             n_chunks = n // chunk_len
+
             for i in range(n_chunks):
                 s = i * chunk_len
                 self.chunks.append((
@@ -206,7 +195,8 @@ def train_stateful_single_file(
     train_manifest='/home/ubuntu/dsp-modeler/data/train/manifest.jsonl',
     dry_filename='/home/ubuntu/dsp-modeler/data/input/input.wav',
     device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-    model_output_dir=''
+    model_output_dir='',
+    trim_noise=True
 ):
     """
     Diagnostic variant of train(): processes ONE file's chunks in
@@ -233,24 +223,16 @@ def train_stateful_single_file(
         record = json.loads(f.readline())
     wet_path = wet_dir + '/' + record['id'] + '.wav'
     wet_full, wet_sr = load_wav(wet_path)
+    if trim_noise:
+        noise_profile = sc.estimate_noise_profile(wet_full[:n_trim], wet_sr) # pre-silence
+        wet_full = sc.spectral_subtract(wet_full, noise_profile, sr)
     assert wet_sr == sr, f"{wet_path} has a different sample rate than {dry_filename}"
     wet_trim = wet_full[n_trim:]
 
-    # shift dry and wet (1 wet only)
-    delay_samples, sr = measure_delay(
-        wet_trim,
-        dry_trim,
-        sr,
-        n_onsets=20, # n strongest moments in the dry guitar recording where a note starts
-        n_candidates_per_onset=10,
-        window_seconds=0.4,
-        search_seconds=1.0,
-        preroll_seconds=0.05, # window starts X s before the detected onset
-        min_spacing_seconds=3.0, # time between onsets to keep from picking the same note played
-        cluster_window_seconds=0.02,
-        verbose=False,
-    )
 
+
+    # shift dry and wet (1 wet only) - cut samples to return overlap only
+    delay_samples, sr = measure_delay(wet_trim, dry_trim, sr, verbose=False)
     dry_aligned, wet_aligned = apply_shift(dry_full, wet_full, delay_samples)
     n = len(dry_aligned)
     n_chunks = n // chunk_len # number of full chunks in data
@@ -262,12 +244,12 @@ def train_stateful_single_file(
         torch.tensor([n_param_val_dict[pn]], dtype=param_configs[pn]['dtype'], device=device)
         for pn in param_names
     ]
-
-    model = ConditionedLSTM(input_size=4, hidden_size=20).to(device)
+    input_size = len(param_names) + 1
+    model = ConditionedLSTM(input_size=input_size, hidden_size=20).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
 
-    GAIN = 20.0
+    GAIN = 1.0
     for epoch in range(epochs):
         model.train() # puts model into training mode / keep inside the loop incase eval .eval() is used later in loop
         states = None  # hidden state and cell state (h_n, c_n)
@@ -292,6 +274,10 @@ def train_stateful_single_file(
             # (output, (h_n, c_n)) = model(x, None)
             pred, states = model(x, states)
             pred = pred / GAIN
+
+            # For truncated BPTT
+            # take each of h_n and c_n and creates a new tensor with the identical numeric value, but with the 
+            # graph connection back through this chunk's LSTM computation cut off
             states = tuple(s.detach() for s in states)  # keep only the previous gradient step in memory
 
             # in first iteration only
@@ -313,8 +299,9 @@ def train_stateful_single_file(
                 target_sq_sum += target_for_loss.pow(2).sum().item()
                 n_vals += pred_for_loss.numel()
 
+            # Only apply gradients after accumulating multiple chunks in order to avoid less certain gradients at low volumes
             # apply new gradients to weights if reached accum_chunks or last chunk
-            accum_chunks = int(1 / chunk_seconds)  # ~1s at chunk_seconds=0.03
+            accum_chunks = int(1 / chunk_seconds) # ~1s at chunk_seconds=0.03
             remaining_after_this = n_chunks - (i + 1) # dont submit if there is not a full chunk after this
             if (len(accum_preds) == accum_chunks and remaining_after_this >= accum_chunks) or i == n_chunks - 1:
                 loss = combined_loss(torch.cat(accum_preds, dim=1), torch.cat(accum_targets, dim=1))

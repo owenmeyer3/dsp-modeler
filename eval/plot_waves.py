@@ -29,7 +29,13 @@ import eval.spectral_compare as sc
 config = get_config()
 
 
-def plot_waveforms(normalized, sr, out_path, chunk_seconds=2, zoom_seconds=0.05):
+def plot_waveforms(
+    normalized, 
+    sr, 
+    out_path, 
+    chunk_seconds=2, 
+    zoom_seconds=0.05
+):
     """Stacked full-chunk waveform per signal, plus a short zoomed-in
     overlay panel so shape differences (not just separate, hard-to-compare
     plots) are visible directly on the same axes."""
@@ -64,56 +70,3 @@ def plot_waveforms(normalized, sr, out_path, chunk_seconds=2, zoom_seconds=0.05)
     plt.tight_layout()
     plt.savefig(out_path, dpi=130, bbox_inches='tight')
     plt.close(fig)
-
-
-def main(
-    dry_path='/Users/owenmeyer/dsp-modeler/model_data/input.wav',
-    real_path='/Users/owenmeyer/dsp-modeler/d-4_f-4_v-6.wav',
-    pred_path='/Users/owenmeyer/dsp-modeler/outputs/pred_d-4_f-4_v-6.wav',
-    output_dir='/Users/owenmeyer/dsp-modeler/outputs',
-    target_lufs=-23.0,
-):
-    sr, dry_full = sc.load(dry_path)
-    sr_r, real_full = sc.load(real_path)
-    sr_p, pred_full = sc.load(pred_path)
-    assert sr == sr_r == sr_p, "sample rate mismatch between dry/real/pred"
-
-    n_trim = int(config['SILENT_LEADIN_SECONDS'] * sr)
-    dry_trim = dry_full[n_trim:]
-    real_trim = real_full[n_trim:]
-    n_common = min(len(dry_trim), len(real_trim))
-    dry_trim, real_trim = dry_trim[:n_common], real_trim[:n_common]
-
-    delay_samples, sr = measure_delay(real_trim, dry_trim, sr, n_onsets=20, search_seconds=1.0, cluster_window_seconds=0.02)
-    print(f"real capture shift relative to dry: {delay_samples} samples ({delay_samples / sr * 1000:.3f} ms)")
-
-    dry_aligned, real_aligned = apply_shift(dry_full, real_full, delay_samples)
-    # pred shares dry_full's indexing exactly (no physical round trip),
-    # so it gets the same slice dry_aligned came from
-    pred_aligned = pred_full[:len(dry_aligned)]
-
-    n = min(len(real_aligned), len(pred_aligned))
-    real_aligned, pred_aligned = real_aligned[:n], pred_aligned[:n]
-
-    real_eval = real_aligned[n_trim:]
-    pred_eval = pred_aligned[n_trim:]
-
-    real_noise_floor = sc.measure_noise_floor(real_eval, sr)
-    pred_noise_floor = sc.measure_noise_floor(pred_eval, sr)
-    real_gate = real_noise_floor + 10
-    pred_gate = pred_noise_floor + 10
-    real_lufs = sc.integrated_level(real_eval, sr, real_gate)
-    pred_lufs = sc.integrated_level(pred_eval, sr, pred_gate)
-
-    real_norm = real_eval * 10 ** ((target_lufs - real_lufs) / 20)
-    pred_norm = pred_eval * 10 ** ((target_lufs - pred_lufs) / 20)
-
-    normalized = {'real_v6': real_norm, 'pred_v6': pred_norm}
-    os.makedirs(output_dir, exist_ok=True)
-    out_path = f'{output_dir}/eval_v6_waveform.png'
-    plot_waveforms(normalized, sr, out_path)
-    print(f"Saved {out_path}")
-
-
-if __name__ == '__main__':
-    main()

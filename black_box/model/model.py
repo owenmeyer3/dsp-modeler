@@ -20,27 +20,68 @@ Output: predicted audio sample
 import torch
 import torch.nn as nn
 
+"""
+LSTM 
+Act Fns
+- Sigmoid activation fn (y[0,1] x[-inf,inf], (0, 0.5))
+- Hyp. Tangent activation fn (y[-1,1] x[-inf,inf], (0, 0))
+
+States
+- Cell State c_n (Long-term momory)
+- Hidden State h_n (Short-term memory)
+
+seq_len = samples per chunk
+input_size = 1 audio sample + num conditioning params
+
+Chunk slice of input data [input_sample] + [params]
+[
+    [0.0, -0.3, -0.3, -0.3],
+    [0.5, -0.3, -0.3, -0.3],
+    [0.1, -0.3, -0.3, -0.3],
+    [0.5, -0.3, -0.3, -0.3],
+]
+
+Batch
+[
+    [
+        [0.0, -0.3, -0.3, -0.3],
+        [0.5, -0.3, -0.3, -0.3],
+        [0.1, -0.3, -0.3, -0.3],
+        [0.5, -0.3, -0.3, -0.3]
+    ],
+    [
+        [0.0, -0.1, -0.1, -0.1],
+        [-0.5, -0.1, -0.1, -0.1],
+        [1, -0.1, -0.1, -0.1],
+        [-0.5, -0.1, -0.1, -0.1]
+    ],
+    ...
+]
+"""
+
 
 class ConditionedLSTM(nn.Module):
     def __init__(self, input_size=4, hidden_size=20, num_layers=1):
         """
-        input_size: 1 audio sample + N conditioning parameters (3 for you: volume, distortion, filter)
+        input_size: 1 audio sample + N conditioning parameters (3 for RAT: volume, distortion, filter)
         hidden_size: LSTM hidden units. 20 is GuitarML's well-tested default for real-time performance on modest CPUs 
-            -- a reasonable starting point, not a hard requirement for your own custom JUCE inference code.
+            -- a reasonable starting point
         """
         super().__init__()
         self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
         self.dense = nn.Linear(hidden_size, 1)
 
-    def forward(self, x, hidden=None):
+    def forward(self, x, states=None):
         """
+        seq_len = samples per chunk
+        input_size = 1 audio sample + num conditioning params
         x: (batch, seq_len, input_size) -- audio sample + conditioning params at every timestep
-        hidden: optional (h_0, c_0) LSTM state, for continuing across truncated-backprop-through-time chunks
-        returns: (output, hidden) where output is (batch, seq_len, 1)
+        states: optional (h_0, c_0) for continuing across truncated-backprop-through-time chunks
+        returns: (output, (h_0, c_0)) where output is (batch, seq_len, 1)
         """
-        out, hidden = self.lstm(x, hidden)
+        out, states = self.lstm(x, states)
         out = self.dense(out)
-        return out, hidden
+        return out, states
 
 def make_conditioned_input(dry, params):
     """
@@ -78,12 +119,16 @@ def normalize_params(params, param_configs):
 # GuitarML/Wright lineage of work, and the anti-aliasing fine-tuning
 # paper referenced alongside it)
 # ---------------------------------------------------------------------------
-def esr_loss(pred, target, eps=1e-8):
-    """Error-to-Signal Ratio: normalizes error by the target's own energy,
-    so the loss is scale-invariant (a quiet passage and a loud passage
-    are weighted fairly, rather than the loss being dominated by
-    whichever happens to be louder)."""
-    return torch.sum((pred - target) ** 2) / (torch.sum(target ** 2) + eps)
+# def esr_loss(pred, target, eps=1e-8):
+#     """Error-to-Signal Ratio: normalizes error by the target's own energy,
+#     so the loss is scale-invariant (a quiet passage and a loud passage
+#     are weighted fairly, rather than the loss being dominated by
+#     whichever happens to be louder)."""
+#     return torch.sum((pred - target) ** 2) / (torch.sum(target ** 2) + eps)
+
+def esr_loss(pred, target, eps=1e-8, min_energy=1e-4):
+    energy = torch.sum(target ** 2)
+    return torch.sum((pred - target) ** 2) / (torch.maximum(energy, torch.tensor(min_energy)) + eps)
 
 
 def dc_loss(pred, target):
