@@ -242,7 +242,7 @@ def train_stateful_single_file(
         for pn in param_names
     ]
     input_size = len(param_names) + 1
-    model = ConditionedLSTM(input_size=input_size, hidden_size=20).to(device)
+    model = ConditionedLSTM(input_size=input_size, hidden_size=40).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # Every epoch, scheduler.step(avg_loss) hands the scheduler that epoch's loss.

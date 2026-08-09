@@ -34,7 +34,11 @@ def plot_waveforms(
     sr, 
     out_path, 
     chunk_seconds=2, 
-    zoom_seconds=0.05
+    zoom_seconds=0.05,
+    start_seconds=None,
+    xlabel="Time (ms)",
+    ylabel="Amplitude",
+    title="Title"
 ):
     """Stacked full-chunk waveform per signal, plus a short zoomed-in
     overlay panel so shape differences (not just separate, hard-to-compare
@@ -42,7 +46,8 @@ def plot_waveforms(
     names = list(normalized.keys())
     chunk_len = int(chunk_seconds * sr)
     zoom_len = int(zoom_seconds * sr)
-    start = len(normalized[names[0]]) // 2
+    # start = len(normalized[names[0]]) // 2
+    start = int(start_seconds * sr) if start_seconds is not None else len(normalized[names[0]]) // 2
 
     t_full = np.arange(chunk_len) / sr
     t_zoom = np.arange(zoom_len) / sr * 1000  # ms
@@ -52,18 +57,18 @@ def plot_waveforms(
     for ax, name in zip(axes[:-1], names):
         chunk = normalized[name][start:start + chunk_len]
         ax.plot(t_full, chunk, linewidth=0.5)
-        ax.set_ylabel('Amplitude')
+        ax.set_ylabel(ylabel)
         ax.set_title(name)
         ax.grid(True, alpha=0.3)
-    axes[-2].set_xlabel('Time (s)')
+    axes[-2].set_xlabel(xlabel)
 
     ax = axes[-1]
     for name in names:
         zoom_chunk = normalized[name][start:start + zoom_len]
         ax.plot(t_zoom, zoom_chunk, label=name, linewidth=1.0)
-    ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('Amplitude')
-    ax.set_title(f'Zoomed overlay ({zoom_seconds * 1000:.0f}ms, both signals on the same axes)')
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
     ax.legend()
     ax.grid(True, alpha=0.3)
 

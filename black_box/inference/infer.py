@@ -106,19 +106,19 @@ def infer(
     print(f"pred stats: min={pred.min():.4f}, max={pred.max():.4f}, std={pred.std():.4f}")
 
 if __name__ == "__main__":
-    infer(
-        dry_path='/home/ubuntu/dsp-modeler/data/input/input.wav',
-        out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav',
-        checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/2026-08-09_18-00/model_best.pt',
-        block_seconds=0.1,  # matches the order of magnitude training already ran thousands of forward passes at without incident
-        param_configs={
-            'd': {'min': 1, 'max': 7, 'dtype': torch.float32},
-            'f': {'min': 1, 'max': 7, 'dtype': torch.float32},
-            'v': {'min': 1, 'max': 7, 'dtype': torch.float32},
-        },
-        params={"d": 3.0, "f": 3.0, "v": 3.0},
-        param_order = ['d', 'f', 'v']
-    )
+    # infer(
+    #     dry_path='/home/ubuntu/dsp-modeler/data/input/input.wav',
+    #     out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav',
+    #     checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/2026-08-09_18-00/model_best.pt',
+    #     block_seconds=0.1,  # matches the order of magnitude training already ran thousands of forward passes at without incident
+    #     param_configs={
+    #         'd': {'min': 1, 'max': 7, 'dtype': torch.float32},
+    #         'f': {'min': 1, 'max': 7, 'dtype': torch.float32},
+    #         'v': {'min': 1, 'max': 7, 'dtype': torch.float32},
+    #     },
+    #     params={"d": 3.0, "f": 3.0, "v": 3.0},
+    #     param_order = ['d', 'f', 'v']
+    # )
 
     evaluate_prediction(
         dry_path = '/home/ubuntu/dsp-modeler/data/input/input.wav',
