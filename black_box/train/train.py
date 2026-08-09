@@ -12,7 +12,7 @@ Expects a file naming convention like: v3_d5_f2_dry.wav / v3_d5_f2_wet.wav
 -- adjust `parse_params_from_filename` to match whatever convention you
 actually used when capturing your dataset.
 """
-import os, torch, json, uuid, datetime
+import os, torch, json, uuid, datetime, copy
 import torch.optim as optim
 from scipy.io import wavfile
 import numpy as np
@@ -105,79 +105,76 @@ class PedalDataset(torch.utils.data.Dataset):
         return tensors
 
 
-def train(
-    batch_size=40,
-    learning_rate = 5e-4,
-    epochs=100,
-    warmup_samples=1000, # let the LSTM "settle" into a chunk before computing loss on it,  so early timesteps with poor hidden state don't dominate the gradient
-    silent_lead_in_seconds=8, # matches your capture convention - trim useless noise signal
-    chunk_seconds=0.1, # TBPTT chunk length - audio ML commonly uses ~2048-4096 samples; at 96kHz - that's roughly 20-40ms -- start small / tune based on your GPU memory
-    param_names=["d", "f", "v"],
-    target="dry",
-    param_configs={
-        'd':{'min':1, 'max':7, 'dtype':torch.float32},
-        'f':{'min':1, 'max':7, 'dtype':torch.float32},
-        'v':{'min':1, 'max':7, 'dtype':torch.float32},
-    },
-    train_manifest = '/home/ubuntu/dsp-modeler/data/train/manifest.json',
-    dry_filename = '/home/ubuntu/dsp-modeler/data/input/input.wav',
-    wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
-    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu',
-    model_output_dir=''
+# def train(
+#     batch_size=40,
+#     learning_rate = 5e-4,
+#     epochs=100,
+#     warmup_samples=1000, # let the LSTM "settle" into a chunk before computing loss on it,  so early timesteps with poor hidden state don't dominate the gradient
+#     silent_lead_in_seconds=8, # matches your capture convention - trim useless noise signal
+#     chunk_seconds=0.1, # TBPTT chunk length - audio ML commonly uses ~2048-4096 samples; at 96kHz - that's roughly 20-40ms -- start small / tune based on your GPU memory
+#     param_names=["d", "f", "v"],
+#     target="dry",
+#     param_configs={
+#         'd':{'min':1, 'max':7, 'dtype':torch.float32},
+#         'f':{'min':1, 'max':7, 'dtype':torch.float32},
+#         'v':{'min':1, 'max':7, 'dtype':torch.float32},
+#     },
+#     train_manifest = '/home/ubuntu/dsp-modeler/data/train/manifest.json',
+#     dry_filename = '/home/ubuntu/dsp-modeler/data/input/input.wav',
+#     wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
+#     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu',
+#     model_output_dir=''
 
-):
-    print(f"device {device}")
-    model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
-    os.makedirs(model_v_output_dir, exist_ok=True)
-    dataset = PedalDataset(
-         train_manifest=train_manifest,
-         wet_dir=wet_dir,
-         param_names=param_names,
-         dry_filename=dry_filename, 
-         param_configs=param_configs, 
-         chunk_seconds=chunk_seconds,
-         silent_lead_in_seconds=silent_lead_in_seconds 
-    )
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+# ):
+#     print(f"device {device}")
+#     model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
+#     os.makedirs(model_v_output_dir, exist_ok=True)
+#     dataset = PedalDataset(
+#          train_manifest=train_manifest,
+#          wet_dir=wet_dir,
+#          param_names=param_names,
+#          dry_filename=dry_filename, 
+#          param_configs=param_configs, 
+#          chunk_seconds=chunk_seconds,
+#          silent_lead_in_seconds=silent_lead_in_seconds 
+#     )
+#     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
-    model = ConditionedLSTM(input_size=4, hidden_size=20).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+#     model = ConditionedLSTM(input_size=4, hidden_size=20).to(device)
+#     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+#     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
 
-    for epoch in range(epochs):
-        model.train()
-        epoch_loss = 0.0
+#     for epoch in range(epochs):
+#         model.train()
+#         epoch_loss = 0.0
 
-        for dry, wet, *params in loader:
-            dry, wet = dry.to(device), wet.to(device)
-            params = [p.to(device) for p in params]
-            x = make_conditioned_input(dry, params)
-            target = wet.unsqueeze(-1)
-            pred, _ = model(x) # hidden=None -> fresh state per chunk; see note below for stateful alternative
+#         for dry, wet, *params in loader:
+#             dry, wet = dry.to(device), wet.to(device)
+#             params = [p.to(device) for p in params]
+#             x = make_conditioned_input(dry, params)
+#             target = wet.unsqueeze(-1)
+#             pred, _ = model(x) # hidden=None -> fresh state per chunk; see note below for stateful alternative
 
-            # Skip the warmup region when computing loss so the model
-            # isn't penalized before its hidden state has "caught up"
-            loss = combined_loss(pred[:, warmup_samples:, :], target[:, warmup_samples:, :])
+#             # Skip the warmup region when computing loss so the model
+#             # isn't penalized before its hidden state has "caught up"
+#             loss = combined_loss(pred[:, warmup_samples:, :], target[:, warmup_samples:, :])
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+#             optimizer.zero_grad()
+#             loss.backward()
+#             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+#             optimizer.step()
 
-            epoch_loss += loss.item()
+#             epoch_loss += loss.item()
 
-        avg_loss = epoch_loss / len(loader)
-        scheduler.step(avg_loss)
-        print(f"Epoch {epoch+1}/{epochs}: ESR+DC loss = {avg_loss:.5f}")
+#         avg_loss = epoch_loss / len(loader)
+#         scheduler.step(avg_loss)
+#         print(f"{epoch+1}/{epochs}: ESR+DC L = {avg_loss:9.3f}  | P mean/std: {pred.mean().item():.5f}/{pred.std().item():.5f}  | T mean/std: {target.mean().item():.5f}/{target.std().item():.5f}")
 
-        if (epoch + 1) % 5 == 0:
-            print(f"  pred mean/std: {pred.mean().item():.5f}/{pred.std().item():.5f} target mean/std: {target.mean().item():.5f}/{target.std().item():.5f}")
+#         if (epoch + 1) % 10 == 0:
+#             torch.save(model.state_dict(), f'{model_v_output_dir}/checkpoint_epoch{epoch+1}.pt')
 
-        if (epoch + 1) % 10 == 0:
-            torch.save(model.state_dict(), f'{model_v_output_dir}/checkpoint_epoch{epoch+1}.pt')
-
-    torch.save(model.state_dict(), f'{model_v_output_dir}/model_final.pt')
-    return model
+#     torch.save(model.state_dict(), f'{model_v_output_dir}/model_final.pt')
+#     return model
 
 def train_stateful_single_file(
     wet_dir,
@@ -202,8 +199,7 @@ def train_stateful_single_file(
     Diagnostic variant of train(): processes ONE file's chunks in
     sequential order (no shuffling, no batching across files) and carries
     the LSTM's hidden state from one chunk to the next, detaching between
-    chunks to truncate backprop -- real TBPTT, matching what this file's
-    own top docstring claims happens. hidden is reset to None only once,
+    chunks to truncate backprop -- real TBPTT. hidden is reset to None only once,
     at the start of each epoch's pass over the file.
 
     Assumes train_manifest's first line is the file to test against.
@@ -211,6 +207,9 @@ def train_stateful_single_file(
     print(f"device {device}")
     model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
     os.makedirs(model_v_output_dir, exist_ok=True)
+    best_loss = float('inf')
+    best_state = None
+    bad_epochs_count = 0
 
     # Get dry data
     dry_full, sr = load_wav(dry_filename)
@@ -229,8 +228,6 @@ def train_stateful_single_file(
     assert wet_sr == sr, f"{wet_path} has a different sample rate than {dry_filename}"
     wet_trim = wet_full[n_trim:]
 
-
-
     # shift dry and wet (1 wet only) - cut samples to return overlap only
     delay_samples, sr = measure_delay(wet_trim, dry_trim, sr, verbose=False)
     dry_aligned, wet_aligned = apply_shift(dry_full, wet_full, delay_samples)
@@ -247,13 +244,19 @@ def train_stateful_single_file(
     input_size = len(param_names) + 1
     model = ConditionedLSTM(input_size=input_size, hidden_size=20).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+
+    # Every epoch, scheduler.step(avg_loss) hands the scheduler that epoch's loss.
+    # The scheduler tracks the best (lowest) loss it's seen so far across the whole run
+    # If patience epochs pass in a row without a new best, it multiplies the learning rate by factor
+    lr_patience = 10
+    lr_factor = 0.5
 
     GAIN = 1.0
     for epoch in range(epochs):
         model.train() # puts model into training mode / keep inside the loop incase eval .eval() is used later in loop
         states = None  # hidden state and cell state (h_n, c_n)
         epoch_loss = 0.0
+        
         pred_sum = pred_sq_sum = target_sum = target_sq_sum = n_vals = 0.0
 
         accum_preds, accum_targets = [], []
@@ -301,7 +304,7 @@ def train_stateful_single_file(
 
             # Only apply gradients after accumulating multiple chunks in order to avoid less certain gradients at low volumes
             # apply new gradients to weights if reached accum_chunks or last chunk
-            accum_chunks = int(1 / chunk_seconds) # ~1s at chunk_seconds=0.03
+            accum_chunks = int(1 / (3*chunk_seconds)) # ~1s at chunk_seconds=0.03
             remaining_after_this = n_chunks - (i + 1) # dont submit if there is not a full chunk after this
             if (len(accum_preds) == accum_chunks and remaining_after_this >= accum_chunks) or i == n_chunks - 1:
                 loss = combined_loss(torch.cat(accum_preds, dim=1), torch.cat(accum_targets, dim=1))
@@ -314,18 +317,33 @@ def train_stateful_single_file(
                 accum_preds, accum_targets = [], []
         avg_loss = epoch_loss / n_backward_steps
 
-        scheduler.step(avg_loss) # gradient step
-
         pred_mean = pred_sum / n_vals
         pred_std = (pred_sq_sum / n_vals - pred_mean ** 2) ** 0.5
         target_mean = target_sum / n_vals
         target_std = (target_sq_sum / n_vals - target_mean ** 2) ** 0.5
 
-        print(f"Epoch {epoch+1}/{epochs}: ESR+DC loss = {avg_loss:.5f}  lr = {optimizer.param_groups[0]['lr']:.2e}")
-        print(f"  pred mean/std: {pred_mean:.5f}/{pred_std:.5f}  target mean/std: {target_mean:.5f}/{target_std:.5f}")
-    torch.save(model.state_dict(), f'{model_v_output_dir}/model_final.pt')
-    return model
+        print(f"{epoch+1}/{epochs}: ESR+DC L = {avg_loss:+9.3f}  | P mean/std: {pred_mean:+.5f}/{pred_std:+.5f}  | T mean/std: {target_mean:+.5f}/{target_std:+.5f}")
+        if avg_loss < best_loss:
+            bad_epochs_count = 0
+            best_loss = avg_loss
+            best_state = copy.deepcopy(model.state_dict())
+        else:
+            bad_epochs_count += 1
+            if bad_epochs_count > lr_patience:
+                
+                # Restore best model weights
+                model.load_state_dict(best_state)
 
+                # change optimizer lr
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] *= lr_factor
+                
+                bad_epochs_count = 0
+                print(f"Plateaued: Restored best weights (ESR+DC L = {avg_loss:+9.3f}) with LR {optimizer.param_groups[0]['lr']:.2e}")
+
+    model.load_state_dict(best_state)
+    torch.save(best_state, f'{model_v_output_dir}/model_best.pt')
+    return model
 
 if __name__ == '__main__':
 
