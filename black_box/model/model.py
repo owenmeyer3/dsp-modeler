@@ -136,6 +136,12 @@ def dc_loss(pred, target):
     prediction and target -- ESR alone doesn't strongly constrain this."""
     return (torch.mean(pred) - torch.mean(target)) ** 2
 
+def pos_neg_balance_loss(pred, target):
+    pred_pos_rms = torch.sqrt((pred[pred > 0] ** 2).mean() + 1e-8) if (pred > 0).any() else torch.tensor(0.0)
+    pred_neg_rms = torch.sqrt((pred[pred < 0] ** 2).mean() + 1e-8) if (pred < 0).any() else torch.tensor(0.0)
+    target_pos_rms = torch.sqrt((target[target > 0] ** 2).mean() + 1e-8) if (target > 0).any() else torch.tensor(0.0)
+    target_neg_rms = torch.sqrt((target[target < 0] ** 2).mean() + 1e-8) if (target < 0).any() else torch.tensor(0.0)
+    return (pred_pos_rms - target_pos_rms) ** 2 + (pred_neg_rms - target_neg_rms) ** 2
 
-def combined_loss(pred, target, dc_weight=0.5):
-    return esr_loss(pred, target) + dc_weight * dc_loss(pred, target)
+def combined_loss(pred, target, dc_weight=0.5, pos_neg_weight=0.0):
+    return esr_loss(pred, target) + dc_weight * dc_loss(pred, target) + pos_neg_weight * pos_neg_balance_loss(pred, target) 

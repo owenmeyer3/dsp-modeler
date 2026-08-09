@@ -339,7 +339,7 @@ def train_stateful_single_file(
                     param_group['lr'] *= lr_factor
                 
                 bad_epochs_count = 0
-                print(f"Plateaued: Restored best weights (ESR+DC L = {avg_loss:+9.3f}) with LR {optimizer.param_groups[0]['lr']:.2e}")
+                print(f"Plateaued: Restored best weights (ESR+DC L = {best_loss:+9.3f}) with LR {optimizer.param_groups[0]['lr']:.2e}")
 
     model.load_state_dict(best_state)
     torch.save(best_state, f'{model_v_output_dir}/model_best.pt')

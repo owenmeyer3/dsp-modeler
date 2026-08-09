@@ -202,27 +202,11 @@ def evaluate_prediction(
     # --- plots + band table ---
     os.makedirs(output_dir, exist_ok=True)
 
-    # serieses = {'real': real_norm, 'real_dn':real_dn_norm, 'pred': pred_norm, 'dry': dry_norm, 'pred_n': pred_n_norm}
-    #serieses = {'real': real_norm, 'pred_n': pred_n_norm}
-    serieses = {'real_dn': real_dn_norm, 'pred': pred_norm}
-    # sc.plot_spectrograms(serieses, sr, f'{output_dir}/eval_norm_spectrograms.png', fmax=24000, vmin=-120)
-    # sc.plot_average_spectrum(serieses, sr, f'{output_dir}/eval_norm_avg_spectrum.png')
-    # print(f"\nSaved {output_dir}/eval_v6_spectrograms.png and {output_dir}/eval_avg_spectrum.png")
-    # sc.print_band_table(serieses, sr, reference='real')
-
-    # --- raw (non-LUFS-matched) dB spectrum, for comparison ---
-    # raw_signals = {'real': real_eval, 'real_dn': real_dn_eval, 'pred': pred_eval, 'dry': dry_eval, 'pred_n':pred_n_eval, 'real_noise':real_noise_eval, 'synth_noise':synth_noise_eval}
-    raw_signals = {'real': real_eval, 'pred_n':pred_n_eval}
-    sc.plot_spectrograms(raw_signals, sr, f'{output_dir}/eval_db_spectrograms.png', fmax=24000, vmin=-120)
-    sc_db.plot_average_spectrum(raw_signals, sr, f'{output_dir}/eval_db_avg_spectrum_db.png')
-    print(f"Saved {output_dir}/eval_avg_spectrum_db.png")
-
     # plot waves
     # serieses = {'real_eval': real_eval, 'pred_n_eval': pred_n_eval}
     # serieses = {'real_noise_eval': real_noise_eval, 'synth_noise_eval': synth_noise_eval}
     serieses = {'real_dn_eval': real_dn_eval, 'pred_eval': pred_eval}
     # serieses = {'real_eval': real_eval, 'pred_n_eval': pred_n_eval}
-
     #serieses = {'real': real_norm, 'pred_n': pred_n_norm}
     # serieses = {'real_dn': real_dn_norm, 'pred': pred_norm}
     # serieses = {'real': real_norm, 'pred_n': pred_n_norm, 'real_dn': real_dn_norm, 'pred': pred_norm}
@@ -235,6 +219,9 @@ def evaluate_prediction(
     plot_waveforms(serieses, sr, f'{output_dir}/eval_waveform_st.png', chunk_seconds=2, zoom_seconds=0.05, start_seconds=1, title="silence time window")
     print(f"Saved {output_dir}/eval_waveform.png")
 
+    sc.plot_spectrograms(serieses, sr, f'{output_dir}/eval_db_spectrograms.png', fmax=24000, vmin=-120)
+    sc_db.plot_average_spectrum(serieses, sr, f'{output_dir}/eval_db_avg_spectrum_db.png')
+    print(f"Saved {output_dir}/eval_avg_spectrum_db.png")
 
 
     # real_shift_aligned, pred_n_shift_aligned = apply_shift(real_norm, pred_n_norm, nt['lag_samples'])

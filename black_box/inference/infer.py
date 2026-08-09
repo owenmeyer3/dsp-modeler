@@ -55,7 +55,7 @@ def infer(
     ):
     device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
-    model = ConditionedLSTM(input_size=4, hidden_size=20).to(device)
+    model = ConditionedLSTM(input_size=4, hidden_size=40).to(device)
     model.load_state_dict(torch.load(checkpoint, map_location=device))
     model.eval()
 
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     # infer(
     #     dry_path='/home/ubuntu/dsp-modeler/data/input/input.wav',
     #     out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav',
-    #     checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/2026-08-09_18-00/model_best.pt',
+    #     checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/2026-08-09_21-25/model_best.pt',
     #     block_seconds=0.1,  # matches the order of magnitude training already ran thousands of forward passes at without incident
     #     param_configs={
     #         'd': {'min': 1, 'max': 7, 'dtype': torch.float32},
