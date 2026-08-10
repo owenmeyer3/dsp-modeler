@@ -21,8 +21,10 @@ from black_box.model.model import ConditionedLSTM, make_conditioned_input, norma
 from common.delay_ops import measure_delay, apply_shift
 from common.utils import load_wav
 import eval.spectral_compare as sc
+from scipy.stats import skew
 
 def get_symmetry(x):
+    x = x.flatten()
     pos = x[x > 0]
     neg = x[x < 0]
     pos_rms = np.sqrt(np.mean(pos**2)) if len(pos) else 0
@@ -32,7 +34,7 @@ def get_symmetry(x):
     skewness = skew(x)
     pn_rms = pos_rms/neg_rms
     p999Overp001 = p99_9/abs(p0_1)
-    return skewness, pn_rms, p999Overp001
+    return [skewness, pn_rms, p999Overp001]
 
 class PedalDataset(torch.utils.data.Dataset):
     """Loads the single shared dry reference (DRY_FILENAME) once, then
@@ -329,7 +331,7 @@ def train_stateful_single_file(
                 n_backward_steps += 1
                 accum_preds, accum_targets = [], []
         
-        # Predict validation
+        # Predict validation def validate(n_chunks, chunk_len, device, param_tensors, combined_loss)
         model.eval()
         with torch.no_grad():
             eval_states = None
@@ -343,8 +345,9 @@ def train_stateful_single_file(
             eval_pred = torch.cat(eval_preds, dim=1)
             eval_target = torch.from_numpy(wet_aligned[:eval_pred.shape[1]].copy()).unsqueeze(0).unsqueeze(-1).to(device)
             eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred, eval_target, dc_weight=0.5, pos_neg_weight=0.2)
-            pSkewness, pPn_rms, pP999Overp001 = get_symmetry(eval_pred)
-            tSkewness, tPn_rms, tP999Overp001 = get_symmetry(eval_target)
+            eval_loss, eval_esr, eval_dc, eval_pn = eval_loss.item(), eval_esr.item(), eval_dc.item(), eval_pn.item()
+            pSkewness, pPn_rms, pP999Overp001 = get_symmetry(eval_pred.detach().cpu().numpy())
+            tSkewness, tPn_rms, tP999Overp001 = get_symmetry(eval_target.detach().cpu().numpy())
             pMean = eval_pred.mean().item()
             pStd = eval_pred.std().item()
             tMean = eval_target.mean().item()

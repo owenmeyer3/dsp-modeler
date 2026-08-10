@@ -204,7 +204,8 @@ def evaluate_prediction(
 
     # plot waves
     # serieses = {'real': real_norm, 'real_dn': real_dn_norm, 'pred': pred_norm, 'pred_n': pred_n_norm}
-    serieses = {'real_eval': real_eval, 'real_dn_eval': real_dn_eval, 'pred_eval': pred_eval}
+    # serieses = {'real_eval': real_eval, 'real_dn_eval': real_dn_eval, 'pred_eval': pred_eval}
+    serieses = {'real_eval': real_eval, 'pred_n_eval': pred_n_eval}
     
     for k, v in serieses.items():
       asymmetry_report(v, k)
