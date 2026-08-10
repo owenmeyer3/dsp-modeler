@@ -76,9 +76,13 @@ class PedalDataset(torch.utils.data.Dataset):
                 wet_records.append(record)
 
         for wr in wet_records:
+            wet_params = wr['params']
             wet_path = wet_dir + '/' + wr['id'] + '.wav'
             wet_full, wet_sr = load_wav(wet_path)
             assert wet_sr == sr, f"{wet_path} has a different sample rate than {dry_filename}"
+
+            noise_profile = sc.estimate_noise_profile(wet_full, wet_sr) # pre-silence
+            wet_dn_full = sc.spectral_subtract(wet_full, noise_profile, sr)
 
             # preprocess
             wet_trim = wet_full[n_trim:]
@@ -93,102 +97,101 @@ class PedalDataset(torch.utils.data.Dataset):
                 self.chunks.append((
                     dry_aligned[s:s + chunk_len],
                     wet_aligned[s:s + chunk_len],
-                    n_param_val_dict
+                    wet_params
                 ))
-
 
     def __len__(self):
         return len(self.chunks)
  
     def __getitem__(self, idx):
-        dry, wet, n_param_val_dict = self.chunks[idx]
+        dry, wet, wet_params = self.chunks[idx]
 
         param_tensors = []
         for pn in self.param_names:
-            val = n_param_val_dict[pn]
+            val = wet_params[pn]
             dtype = self.param_configs[pn]['dtype']
             param_tensors.append(torch.tensor(val, dtype=dtype))
         
-        # tensors = tuple(
-        #     [torch.from_numpy(dry.copy()), torch.from_numpy(wet.copy())] + \
-        #     param_tensors \
-        # )
         tensors = tuple(
-            [torch.from_numpy(dry.copy()), torch.from_numpy(wet.copy())]
+            [torch.from_numpy(dry.copy()), torch.from_numpy(wet.copy())] + \
+            param_tensors \
         )
-        return tensors
 
 
-# def train(
-#     batch_size=40,
-#     learning_rate = 5e-4,
-#     epochs=100,
-#     warmup_samples=1000, # let the LSTM "settle" into a chunk before computing loss on it,  so early timesteps with poor hidden state don't dominate the gradient
-#     silent_lead_in_seconds=8, # matches your capture convention - trim useless noise signal
-#     chunk_seconds=0.1, # TBPTT chunk length - audio ML commonly uses ~2048-4096 samples; at 96kHz - that's roughly 20-40ms -- start small / tune based on your GPU memory
-#     param_names=["d", "f", "v"],
-#     target="dry",
-#     param_configs={
-#         'd':{'min':1, 'max':7, 'dtype':torch.float32},
-#         'f':{'min':1, 'max':7, 'dtype':torch.float32},
-#         'v':{'min':1, 'max':7, 'dtype':torch.float32},
-#     },
-#     train_manifest = '/home/ubuntu/dsp-modeler/data/train/manifest.json',
-#     dry_filename = '/home/ubuntu/dsp-modeler/data/input/input.wav',
-#     wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
-#     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu',
-#     model_output_dir=''
 
-# ):
-#     print(f"device {device}")
-#     model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
-#     os.makedirs(model_v_output_dir, exist_ok=True)
-#     dataset = PedalDataset(
-#          train_manifest=train_manifest,
-#          wet_dir=wet_dir,
-#          param_names=param_names,
-#          dry_filename=dry_filename, 
-#          param_configs=param_configs, 
-#          chunk_seconds=chunk_seconds,
-#          silent_lead_in_seconds=silent_lead_in_seconds 
-#     )
-#     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
-#     model = ConditionedLSTM(input_size=4, hidden_size=20).to(device)
-#     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-#     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
 
-#     for epoch in range(epochs):
-#         model.train()
-#         epoch_loss = 0.0
+def train(
+    batch_size=40,
+    learning_rate = 5e-4,
+    epochs=100,
+    warmup_samples=1000, # let the LSTM "settle" into a chunk before computing loss on it,  so early timesteps with poor hidden state don't dominate the gradient
+    silent_lead_in_seconds=8, # matches your capture convention - trim useless noise signal
+    chunk_seconds=0.1, # TBPTT chunk length - audio ML commonly uses ~2048-4096 samples; at 96kHz - that's roughly 20-40ms -- start small / tune based on your GPU memory
+    param_names=["d", "f", "v"],
+    target="dry",
+    param_configs={
+        'd':{'min':1, 'max':7, 'dtype':torch.float32},
+        'f':{'min':1, 'max':7, 'dtype':torch.float32},
+        'v':{'min':1, 'max':7, 'dtype':torch.float32},
+    },
+    train_manifest = '/home/ubuntu/dsp-modeler/data/train/manifest.json',
+    dry_filename = '/home/ubuntu/dsp-modeler/data/input/input.wav',
+    wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
+    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu',
+    model_output_dir=''
+):
+    print(f"device {device}")
+    model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
+    os.makedirs(model_v_output_dir, exist_ok=True)
+    dataset = PedalDataset(
+         train_manifest=train_manifest,
+         wet_dir=wet_dir,
+         param_names=param_names,
+         dry_filename=dry_filename, 
+         param_configs=param_configs, 
+         chunk_seconds=chunk_seconds,
+         silent_lead_in_seconds=silent_lead_in_seconds 
+    )
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
-#         for dry, wet, *params in loader:
-#             dry, wet = dry.to(device), wet.to(device)
-#             params = [p.to(device) for p in params]
-#             x = make_conditioned_input(dry, params)
-#             target = wet.unsqueeze(-1)
-#             pred, _ = model(x) # hidden=None -> fresh state per chunk; see note below for stateful alternative
+    model = ConditionedLSTM(input_size=4, hidden_size=20).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    best_loss = float('inf')
+    best_state = None
+    bad_epochs_count = 0
 
-#             # Skip the warmup region when computing loss so the model
-#             # isn't penalized before its hidden state has "caught up"
-#             loss = combined_loss(pred[:, warmup_samples:, :], target[:, warmup_samples:, :])
+    for epoch in range(epochs):
+        model.train()
+        epoch_loss = 0.0
 
-#             optimizer.zero_grad()
-#             loss.backward()
-#             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-#             optimizer.step()
+        for dry, wet, *params in loader:
+            dry, wet = dry.to(device), wet.to(device)
+            params = [p.to(device) for p in params]
+            x = make_conditioned_input(dry, params)
+            target = wet.unsqueeze(-1)
+            pred, _ = model(x) # hidden=None -> fresh state per chunk; see note below for stateful alternative
 
-#             epoch_loss += loss.item()
+            # Skip the warmup region when computing loss so the model
+            # isn't penalized before its hidden state has "caught up"
+            loss = combined_loss(pred[:, warmup_samples:, :], target[:, warmup_samples:, :])
 
-#         avg_loss = epoch_loss / len(loader)
-#         scheduler.step(avg_loss)
-#         print(f"{epoch+1}/{epochs}: ESR+DC L = {avg_loss:9.3f}  | P mean/std: {pred.mean().item():.5f}/{pred.std().item():.5f}  | T mean/std: {target.mean().item():.5f}/{target.std().item():.5f}")
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
 
-#         if (epoch + 1) % 10 == 0:
-#             torch.save(model.state_dict(), f'{model_v_output_dir}/checkpoint_epoch{epoch+1}.pt')
+            epoch_loss += loss.item()
 
-#     torch.save(model.state_dict(), f'{model_v_output_dir}/model_final.pt')
-#     return model
+        avg_loss = epoch_loss / len(loader)
+        scheduler.step(avg_loss)
+        print(f"{epoch+1}/{epochs}: ESR+DC L = {avg_loss:9.3f}  | P mean/std: {pred.mean().item():.5f}/{pred.std().item():.5f}  | T mean/std: {target.mean().item():.5f}/{target.std().item():.5f}")
+
+        if (epoch + 1) % 10 == 0:
+            torch.save(model.state_dict(), f'{model_v_output_dir}/checkpoint_epoch{epoch+1}.pt')
+
+    torch.save(model.state_dict(), f'{model_v_output_dir}/model_final.pt')
+    return model
 
 def train_stateful_single_file(
     wet_dir,
