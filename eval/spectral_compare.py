@@ -6,31 +6,6 @@ import matplotlib.pyplot as plt
 from scipy.io import wavfile
 from scipy import signal
 from scipy.signal import stft, istft
-# ---------------------------------------------------------------------------
-# CONFIG — edit these for your own files/comparison
-# ---------------------------------------------------------------------------
-test_file_dir = '/Users/owenmeyer/dsp-modeler/test_files'
-paths = {
-    'dry': f"{test_file_dir}/input.wav",
-    'wet_v4': f"{test_file_dir}/v_4_output.wav",
-    'wet_v7': f"{test_file_dir}/v_7_output.wav"
-}
-TARGET_LUFS = -23.0          # common loudness target for level-matching
-NULL_TEST_PAIR = ('wet_v4', 'wet_v7')  # which two keys to null-test against each other
-OUTPUT_DIR = '.'             # where to save the .png plots
-
-# Every file is expected to start with this much real silence (hardware
-# noise floor, no played signal) -- e.g. 3 measures at 120bpm = 8.0s.
-SILENT_LEADIN_SECONDS = 8.0
-USE_PERCEPTUAL_WEIGHTING = True  # True: LUFS/K-weighted (ITU-R BS.1770,
-                                  #   matches how loud it sounds to a person)
-                                  # False: plain dBFS, raw physical energy,
-                                  #   no perceptual curve applied
-USE_ADAPTIVE_GATE = True     # gate each file relative to its OWN measured
-                              # noise floor instead of a fixed -70 LUFS/dBFS
-ADAPTIVE_GATE_MARGIN_DB = 10  # gate = noise_floor + this many dB
-TRIM_LEADIN_BEFORE_ANALYSIS = True  # drop the silent lead-in before
-                                     # spectrograms/null test/etc.
 
 # ---------------------------------------------------------------------------
 # ITU-R BS.1770 K-weighting + integrated LUFS
@@ -106,7 +81,7 @@ def _to_dbfs(p):
     just the physical energy relative to full scale."""
     return 10 * np.log10(p)
 
-def measure_noise_floor(data, sr, duration=SILENT_LEADIN_SECONDS, weighted=True):
+def measure_noise_floor(data, sr, duration=8.0, weighted=True):
     """Loudness of just the known-silent lead-in (no gating needed, since
     we already know this region contains no played signal). Returns LUFS
     if weighted=True, plain dBFS if weighted=False."""
@@ -145,10 +120,11 @@ def plot_spectrograms(normalized, sr, out_path, chunk_seconds=8, fmin=0, fmax=12
     plt.close(fig)
 
 
-def plot_average_spectrum(normalized, sr, out_path, chunk_seconds=8):
+def plot_average_spectrum(normalized, sr, out_path, chunk_seconds=8, start_seconds=None):
     names = list(normalized.keys())
     chunk_len = int(chunk_seconds * sr)
     start = len(normalized[names[0]]) // 2
+    start = int(start_seconds * sr) if start_seconds is not None else len(signals[names[0]]) // 2
 
     plt.figure(figsize=(10, 5))
     for name in names:
@@ -245,14 +221,3 @@ def null_test(a, b, sr, chunk_seconds=5, search_seconds=1):
         'a_aligned': a_al,
         'b_aligned': b_al,
     }
-
-    
-# def rms_dbfs(data):
-#     """Plain, unweighted RMS level in dBFS for a whole array in one shot --
-#     handy for a quick single-number check, e.g. rms_dbfs(data[:some_slice])."""
-#     return _to_dbfs(np.mean(data ** 2) + 1e-15)
-
-
-# Backwards-compatible name used elsewhere in this file / by anyone importing it.
-# def integrated_lufs(data, sr, abs_gate=-70.0):
-#     return integrated_level(data, sr, abs_gate, weighted=True)

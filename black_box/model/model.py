@@ -131,17 +131,29 @@ def esr_loss(pred, target, eps=1e-8, min_energy=1e-4):
     return torch.sum((pred - target) ** 2) / (torch.maximum(energy, torch.tensor(min_energy)) + eps)
 
 
-def dc_loss(pred, target):
+def dc_loss(pred, target, eps=1e-8):
     """Penalizes any DC offset difference (mean-level mismatch) between
     prediction and target -- ESR alone doesn't strongly constrain this."""
-    return (torch.mean(pred) - torch.mean(target)) ** 2
+    target_var = torch.var(target) + eps
+    return (torch.mean(pred) - torch.mean(target)) ** 2 / target_var
 
-def pos_neg_balance_loss(pred, target):
-    pred_pos_rms = torch.sqrt((pred[pred > 0] ** 2).mean() + 1e-8) if (pred > 0).any() else torch.tensor(0.0)
-    pred_neg_rms = torch.sqrt((pred[pred < 0] ** 2).mean() + 1e-8) if (pred < 0).any() else torch.tensor(0.0)
-    target_pos_rms = torch.sqrt((target[target > 0] ** 2).mean() + 1e-8) if (target > 0).any() else torch.tensor(0.0)
-    target_neg_rms = torch.sqrt((target[target < 0] ** 2).mean() + 1e-8) if (target < 0).any() else torch.tensor(0.0)
-    return (pred_pos_rms - target_pos_rms) ** 2 + (pred_neg_rms - target_neg_rms) ** 2
+def pos_neg_balance_loss(pred, target, eps=1e-8):
+    target_var = torch.var(target) + eps
+    pred_pos_rms = torch.sqrt((pred.clamp(min=0) ** 2).mean() + eps)
+    pred_neg_rms = torch.sqrt((pred.clamp(max=0) ** 2).mean() + eps)
+    target_pos_rms = torch.sqrt((target.clamp(min=0) ** 2).mean() + eps)
+    target_neg_rms = torch.sqrt((target.clamp(max=0) ** 2).mean() + eps)
+    return ((pred_pos_rms - target_pos_rms) ** 2 + (pred_neg_rms - target_neg_rms) ** 2) / target_var
 
-def combined_loss(pred, target, dc_weight=0.5, pos_neg_weight=0.0):
-    return esr_loss(pred, target) + dc_weight * dc_loss(pred, target) + pos_neg_weight * pos_neg_balance_loss(pred, target) 
+def combined_loss(pred, target, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=0.0):
+    esr = esr_loss(pred, target)
+    dc = dc_loss(pred, target)
+    pos_neg_balance = pos_neg_balance_loss(pred, target)
+
+    return [
+        esr + dc_weight * dc + pos_neg_weight * pos_neg_balance,
+        esr,
+        dc,
+        pos_neg_balance
+    ]
+
