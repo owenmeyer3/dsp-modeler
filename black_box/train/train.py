@@ -257,7 +257,7 @@ def train_stateful_single_file(
     dry_aligned, wet_aligned = apply_shift(dry_full, wet_full, delay_samples)
     n = len(dry_aligned)
     n_chunks = n // chunk_len # number of full chunks in data
-    accum_chunks = int(1 / chunk_seconds) # ~1s at chunk_seconds=0.03
+    accum_chunks = int(0.03*20 / chunk_seconds) # ~1s at chunk_seconds=0.03
     print(f"Sequential single-file run: {n_chunks} full chunks of {chunk_seconds*1000:.0f}ms each")
 
     # Feature info
@@ -752,6 +752,12 @@ def train_shuffled_segmented_single_file(
                     pred_for_loss = pred[:, warmup_samples:, :]
                     target_for_loss = target_batch[:, warmup_samples:, :]
                     loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, dc_weight=0.5, pos_neg_weight=0.2)
+            
+                    optimizer.zero_grad() # clear old gradients
+                    loss.backward() # compute fresh gradients for this accumulated window only
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
+                    optimizer.step() # apply them to the weights
+            
             else:
                 for segment in segments:    
                     s_preds, s_targets = [], []
@@ -777,10 +783,10 @@ def train_shuffled_segmented_single_file(
                             s_targets.append(target_for_loss)
                         loss, _, _, _ = combined_loss(torch.cat(s_preds, dim=1), torch.cat(s_targets, dim=1), dc_weight=0.5, pos_neg_weight=0.2)
 
-            optimizer.zero_grad() # clear old gradients
-            loss.backward() # compute fresh gradients for this accumulated window only
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
-            optimizer.step() # apply them to the weights
+                    optimizer.zero_grad() # clear old gradients
+                    loss.backward() # compute fresh gradients for this accumulated window only
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
+                    optimizer.step() # apply them to the weights
 
         if verbose_performance: print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
@@ -847,7 +853,7 @@ if __name__ == '__main__':
     # model = train_stateful_single_file(
     #     wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
     #     learning_rate=5e-4,
-    #     epochs=40,
+    #     epochs=20,
     #     warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
     #     silent_lead_in_seconds=8,
     #     chunk_seconds=0.03,
@@ -866,7 +872,7 @@ if __name__ == '__main__':
     # 1 audio overfit - chunks in shuffles sequences
     train_shuffled_segmented_single_file(
         wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
-        learning_rate=5e-4,
+        learning_rate=5e-4*30,
         epochs=20,
         warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
         silent_lead_in_seconds=8,
