@@ -728,7 +728,7 @@ def train_shuffled_segmented_single_file(
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     prepped = datetime.datetime.now()
-    print(f"Prep took {prepped - start}")
+    if verbose_time: print(f"Prep took {prepped - start}")
 
     GAIN = 1.0
     print("      |                 LOSS                   |           PREDICTIONS         |         TARGET             ")
@@ -736,12 +736,11 @@ def train_shuffled_segmented_single_file(
     #     "03/40 |  +27.159   +25.270 / +25.270 / +25.270 |  +0.00018 / +0.00085 / +0.05  |  +0.00000 / +0.00113 / -1.20" 
     multichunk_predict = False
     multibatch_predict = True
-    verbose = True
     for epoch in range(epochs):
         model.train() # puts model into training mode / keep inside the loop incase eval .eval() is used later in loop
         e_time = datetime.datetime.now()
 
-        prof_ctx = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) if verbose else nullcontext()
+        prof_ctx = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) if verbose_performance else nullcontext()
 
         with prof_ctx as prof:
 
@@ -778,15 +777,15 @@ def train_shuffled_segmented_single_file(
                             s_targets.append(target_for_loss)
                         loss, _, _, _ = combined_loss(torch.cat(s_preds, dim=1), torch.cat(s_targets, dim=1), dc_weight=0.5, pos_neg_weight=0.2)
 
-                optimizer.zero_grad() # clear old gradients
-                loss.backward() # compute fresh gradients for this accumulated window only
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
-                optimizer.step() # apply them to the weights
+            optimizer.zero_grad() # clear old gradients
+            loss.backward() # compute fresh gradients for this accumulated window only
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
+            optimizer.step() # apply them to the weights
 
-        if verbose: print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+        if verbose_performance: print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
         t_time =  datetime.datetime.now()
-        if verbose: print(f"Train time: {t_time - e_time}")
+        if verbose_time: print(f"Train time: {t_time - e_time}")
 
         # Predict validation def validate(n_chunks, chunk_len, device, param_tensors, combined_loss)
         model.eval()
@@ -818,7 +817,7 @@ def train_shuffled_segmented_single_file(
         model.train() # return to train mode
 
         v_time =  datetime.datetime.now()
-        if verbose: print(f"Validation time: {v_time - t_time}")
+        if verbose_time: print(f"Validation time: {v_time - t_time}")
 
         # Reset model if diverging and lower learning rate
         if eval_loss < best_loss:
@@ -865,27 +864,27 @@ if __name__ == '__main__':
     # )
 
     # 1 audio overfit - chunks in shuffles sequences
-    # train_shuffled_segmented_single_file(
-    #     wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
-    #     learning_rate=5e-4,
-    #     epochs=20,
-    #     warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
-    #     silent_lead_in_seconds=8,
-    #     chunk_seconds=0.03,
-    #     param_names=["d", "f", "v"],
-    #     param_configs={
-    #         'd':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'f':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'v':{'min':1, 'max':7, 'dtype':torch.float32},
-    #     },
-    #     train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl',
-    #     dry_filename='/home/ubuntu/dsp-modeler/data/input/input.wav',
-    #     device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-    #     model_output_dir = f'/home/ubuntu/dsp-modeler/black_box/model/models',
-    #     trim_noise=True,
-    #     lr_patience = 6,
-    #     lr_factor = 0.5
-    # )
+    train_shuffled_segmented_single_file(
+        wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
+        learning_rate=5e-4,
+        epochs=20,
+        warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
+        silent_lead_in_seconds=8,
+        chunk_seconds=0.03,
+        param_names=["d", "f", "v"],
+        param_configs={
+            'd':{'min':1, 'max':7, 'dtype':torch.float32},
+            'f':{'min':1, 'max':7, 'dtype':torch.float32},
+            'v':{'min':1, 'max':7, 'dtype':torch.float32},
+        },
+        train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl',
+        dry_filename='/home/ubuntu/dsp-modeler/data/input/input.wav',
+        device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
+        model_output_dir = f'/home/ubuntu/dsp-modeler/black_box/model/models',
+        trim_noise=True,
+        lr_patience = 6,
+        lr_factor = 0.5
+    )
 
     # Many audio trains - chunked in shuffled sequences
     # train_manifest(
