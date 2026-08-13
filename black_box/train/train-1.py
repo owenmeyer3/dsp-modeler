@@ -1,36 +1,45 @@
 import json, torch, random, datetime, copy, os
 import torch.optim as optim
 import torch.nn as nn
+import numpy as np
 from black_box.model.model import ConditionedLSTM, combined_loss
 from common.utils import load_wav
 from eval.spectral_compare import estimate_noise_profile, spectral_subtract
 from common.delay_ops import measure_delay, apply_shift
+from scipy.stats import skew
+
+
+def get_symmetry(x):
+    x = x.flatten()
+    pos = x[x > 0]
+    neg = x[x < 0]
+    pos_rms = np.sqrt(np.mean(pos**2)) if len(pos) else 0
+    neg_rms = np.sqrt(np.mean(neg**2)) if len(neg) else 0
+    p99_9 = np.percentile(x, 99.9)
+    p0_1 = np.percentile(x, 0.1)
+    skewness = skew(x)
+    pn_rms = pos_rms/neg_rms
+    p999Overp001 = p99_9/abs(p0_1)
+    return [skewness, pn_rms, p999Overp001]
+
 
 class Chunk():
     def __init__(self, features, target):
         self.features=features
         self.target=target
 
+
 class Segment():
     def __init__(self, chunks, noise_profile=None):
         self.chunks:list[Chunk]=chunks
         self.noise_profile=noise_profile
     
-    def input_tensor():
-        return torch.cat([chunk['input'] for chunk in self.chunks], dim=1)
+    def input_tensor(self):
+        return torch.cat([chunk.features for chunk in self.chunks], dim=1)
 
-    def target_tensor():
-        return torch.cat([chunk['target'] for chunk in self.chunks], dim=1)
+    def target_tensor(self):
+        return torch.cat([chunk.target for chunk in self.chunks], dim=1)
 
-class TrackBatch():
-    def __init__(self, segment_i, segments):
-
-        self.segment_i=0
-        self.segments:list[Segment]=segments
-
-class TrackBatchGroup():
-    def __init__(self, track_batches):
-        self.track_batches:list[TrackBatch]=track_batches
 
 class Track():
     def __init__(self, segments):
@@ -39,16 +48,9 @@ class Track():
         random.seed(seed)
         random.shuffle(self.segments)
 
-class RandomBatch():
-    def __init__(self):
-        self.segments=[]
-    def shuffle(self, seed=42):
-        random.seed(seed)
-        random.shuffle(self.segments)
-
 
 class DataSet():
-    def __init__(self, manifest_file, dry_file, wet_dir, chunk_seconds, param_names, param_configs, silent_lead_in_seconds=8, trim_noise = True):
+    def __init__(self, manifest_file, dry_file, wet_dir, chunk_seconds, param_names, param_configs, segment_length=20, silent_lead_in_seconds=8, trim_noise = True):
         self.tracks = []
         self.n_segments = 0
         device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
@@ -66,6 +68,7 @@ class DataSet():
             man_records = [json.loads(line) for line in f if line.strip()]
         for man_record in man_records:
             wet_file = wet_dir + '/' + man_record['id'] + '.wav'
+            print(f"For {wet_file}")
             wet_full, wet_sr = load_wav(wet_file)
             params=man_record['params']
             if trim_noise:
@@ -79,17 +82,15 @@ class DataSet():
             delay_samples, sr = measure_delay(wet_trim, dry_trim, sr, verbose=False)
             dry_aligned, wet_aligned = apply_shift(dry_full, wet_full, delay_samples)
             n_samples = len(dry_aligned)
+            print(f"n_samples {n_samples}")
 
-            chunk_len = 20
             n_chunks = n_samples // chunk_len # number of full chunks in data
-
-            chunks_per_segment=20
-            n_segments = n_chunks // chunks_per_segment
+            print(f"n_chunks {n_chunks}")
 
             # Make chunks for this track
-            chunks = []
-
-
+            chunk_bucket=[]
+            segments=[]
+            print(f"n_chunks {n_chunks}")
             for i in range(n_chunks):
                 s = i * chunk_len
 
@@ -104,7 +105,7 @@ class DataSet():
                     param_def = param_configs[k]
                     if param_def['dtype'] == torch.float32:
                         norm_params[k] = 2 * (v - param_def['min']) / (param_def['max'] - param_def['min']) - 1
-
+                
                 param_tensors = [torch.tensor([norm_params[pn]], dtype=param_configs[pn]['dtype'], device=device) for pn in param_names]
 
                 # Make dry input (batch, seq_len, 1)
@@ -115,84 +116,55 @@ class DataSet():
                 param_views = [p.view(batch, 1, 1).expand(batch, seq_len, 1) for p in param_tensors]
                 features_tensor = torch.cat([dry_view] + param_views, dim=-1)
 
-                chunks.append(Chunk(features_tensor, target_tensor))
+                chunk = Chunk(features_tensor, target_tensor)
 
-            segments = []
-            for i in range(n_segments):
-                s = i * chunk_len
-                segments.append(Segment(chunks[s:s + chunk_len], noise_profile))
-
-            track_segments.apend(segments)
-
-
-        min_segments = min([len(t) for t in track_segments])
-
-        self.n_segments = min_segments
-        for track in track_segments:
-            track = Track(segments[:min_segments])
-            self.tracks.append(track)
-
-    def make_track_batch_groups(self, track_size:int=30) -> list[TrackBatchGroup]: # group for each trackset
-
-        all_track_groups = []
-        for T_i in range(0, len(self.tracks), track_size):
-
-            # Get set of tracks in this batch
-            batch_tracks = self.tracks[T:T + track_size]
-
-            track_batches=[]
-            # For each segment length
-            for s_i in range(self.n_segments):
-                # Build columns of track segments
-                column=[]
-                for track in batch_tracks:
-                    column.append(batch_tracks.segments[s_i])
-                # append column of segments to batch of segments for this track
-                track_batches.append(TrackBatch(s_i, column))
+                chunk_bucket.append(chunk)
+                if (i+1) % segment_length == 0:
+                    segments.append(Segment(chunk_bucket, noise_profile))
+                    chunk_bucket = []
             
-            trackset_batch_group = TrackBatchGroup(track_batches)
-            all_track_groups.append(all_track_groups)
-        return all_track_groups
-
+            self.tracks.append(Track(segments))
         
-    def batch_segments_of_time(self, batch_size=30): # (T, t, d)
+        # resize tracks to equal length
+        self.n_segments = min([len(t.segments) for t in self.tracks])
+        self.tracks = [Track(track.segments[:self.n_segments]) for track in self.tracks]
 
+
+
+    def make_track_batches(self, track_size:int=30): # group for each trackset
+
+        batch_group = []
+        for T_i in range(0, len(self.tracks), track_size):
+            batches=[]    
+            # Get set of tracks in this batch
+            tracks = self.tracks[T_i:T_i + track_size]
+
+            # Make column for s=1
+            for s_i in range(self.n_segments):
+                batch=[]
+                for track in tracks:
+                    batch.append(track.segments[s_i])
+            
+                batches.append(batch)
+            
+            batch_group.append(batches)
+        return batch_group
+
+    def batches_of_random(self, batch_size=30, seed=42):
         batches = []
-        for T in range(0, len(self.tracks), batch_size):
+        seg_bucket = []
 
-            # Choose group of tracks from data
-            tracks_in_batch= self.tracks[T:T + batch_size]
-
-            # for point in time
-            time_columns=[]
-            for t_i in range(self.n_segments):
-                
-                # look through each track
-                time_column=[]
-                for track in track_groups:
-                    # append tracks segment at this point in time to array of segs at this time
-                    time_column.append(track.segments[t_i])
-                time_columns.append(time_column)
+        flat_segments = []
+        for segments in [track.segments for track in self.tracks]:
+            flat_segments += segments
         
-            batches.append(time_columns)
+        for i, segment in enumerate(flat_segments):
+        
+            seg_bucket.append(segment)
+            if (i+1) % batch_size == 0:
+                batches.append(seg_bucket)
+                seg_bucket = []
 
-    def batch_segments_of_track(self, batch_size=30):
-        segments = [track.segments for track in self.tracks] # (s, t)
-        batches = []
-        for segment in segments:
-
-            for t in range(0, len(segments), batch_size):
-                batch = Batch(segment[t:t + batch_size])
-                batches.append(batch)
-
-        return batches
-
-    def batch_segments_of_random(self, batch_size=30, seed=42):
-        batches = []
-        for segment in [track.segments for track in self.tracks]:
-            for t in range(0, len(segments), batch_size):
-                batch = Batch(segment[t:t + batch_size])
-                batches.append(batch)
         return batches
 
 
@@ -269,7 +241,7 @@ def train_manifest(
     lr_patience = 6,
     lr_factor = 0.5,
     batch_size=30,
-    hidden_size=40,
+    hidden_size=20,
     verbose_time=False,
     verbose_performance = False
 ):
@@ -279,8 +251,11 @@ def train_manifest(
     os.makedirs(model_v_output_dir, exist_ok=True)
     
     # Load data
+    print(f"Load")
     train_dataset = DataSet(train_manifest, dry_file, wet_dir, chunk_seconds, param_names, param_configs, silent_lead_in_seconds=silent_lead_in_seconds, trim_noise = trim_noise)
+    print(f"Loaded 1")
     validation_dataset = DataSet(validation_manifest, dry_file, wet_dir, chunk_seconds, param_names, param_configs, silent_lead_in_seconds=silent_lead_in_seconds, trim_noise = trim_noise)
+    print(f"Loaded 2")
 
     # Model info
     model = ConditionedLSTM(input_size=len(param_names) + 1, hidden_size=hidden_size).to(device)
@@ -301,10 +276,11 @@ def train_manifest(
         e_time = datetime.datetime.now()
 
         # Training
-        for batch in train_dataset.batch_segments_of_random(): # batched segments of no specified track or ts
+        model.train()
+        for batch in train_dataset.batches_of_random(): # batched segments of no specified track or ts
             # get 
-            input_batch = torch.cat([segment.input_tensor() for segment in batch.segments], dim=0)
-            target_batch = torch.cat([segment.target_tensor() for segment in batch.segments], dim=0)
+            input_batch = torch.cat([segment.input_tensor() for segment in batch], dim=0)
+            target_batch = torch.cat([segment.target_tensor() for segment in batch], dim=0)
 
             pred, _ = model(input_batch, None)
             pred_for_loss = pred[:, warmup_samples:, :]
@@ -324,24 +300,21 @@ def train_manifest(
         with torch.no_grad():
         # Predictions
             eval_states = None
-            num_tracks = 30 # batch_size
             eval_preds = [[] for _ in range(num_tracks)]
             eval_targets = [[] for _ in range(num_tracks)]
 
             # Per Track group
-            track_batch_groups = validation_dataset.make_track_batch_groups(track_size=30) # -> list[TrackBatchGroup]
-            for track_batch_group in track_batch_groups:
-                
-                # Per column batch
-                for track_batch in track_batch_group.track_batches:
+            batch_groups = validation_dataset.make_track_batches(track_size=30)
+            for batches in batch_groups:
+                for batch in batches:
+                    for segment in batch:
 
-                    # Predict segments of column
-                    input_batch = torch.cat([segment.input_tensor() for segment in track_batch.segments], dim=0)
-                    target_batch = torch.cat([segment.target_tensor() for segment in track_batch.segments], dim=0)
-                    pred_batch, states = model(input_batch, eval_states)
+                        input_batch = torch.cat([segment.input_tensor() for segment in batch], dim=0)
+                        target_batch = torch.cat([segment.target_tensor() for segment in batch], dim=0)
+                        pred_batch, eval_states = model(input_batch, eval_states)
 
                     # Save pred, tgt in memory structure
-                    for i, track in enumerate(track_batch.segments):
+                    for i, track in enumerate(batch):
                         eval_preds[i].append(pred_batch[i:i+1])
                         eval_targets[i].append(target_batch[i:i+1])
 
@@ -435,8 +408,6 @@ if __name__ == '__main__':
         trim_noise=True,
         lr_patience = 6,
         lr_factor = 0.5,
-        batch_size=30,
-        hidden_size=20,
         verbose_time=False,
         verbose_performance = False
     )
