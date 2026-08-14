@@ -43,7 +43,7 @@ from black_box.eval.evaluate_prediction import evaluate_prediction
 def infer(
         dry_path='/home/ubuntu/dsp-modeler/data/input/input.wav',
         out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav',
-        checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/2026-07-31_01-37/model_final.pt',
+        checkpoint = '',
         block_seconds=0.1,  # matches the order of magnitude training already ran thousands of forward passes at without incident
         param_configs={
             'd': {'min': 1, 'max': 7, 'dtype': torch.float32},
@@ -51,11 +51,12 @@ def infer(
             'v': {'min': 1, 'max': 7, 'dtype': torch.float32},
         },
         params={"d": 5.0, "f": 5.0, "v": 5.0},
-        param_order = ['d', 'f', 'v']
+        param_order = ['d', 'f', 'v'],
+        hidden_size=20
     ):
     device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
-    model = ConditionedLSTM(input_size=4, hidden_size=20).to(device)
+    model = ConditionedLSTM(input_size=4, hidden_size=hidden_size).to(device)
     model.load_state_dict(torch.load(checkpoint, map_location=device))
     model.eval()
 
@@ -109,7 +110,7 @@ if __name__ == "__main__":
     infer(
         dry_path='/home/ubuntu/dsp-modeler/data/input/input.wav',
         out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav',
-        checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/2026-08-13_00-14/model_best.pt',
+        checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/2026-08-14_20-46/model_best.pt',
         block_seconds=0.1,  # matches the order of magnitude training already ran thousands of forward passes at without incident
         param_configs={
             'd': {'min': 1, 'max': 7, 'dtype': torch.float32},
@@ -117,7 +118,8 @@ if __name__ == "__main__":
             'v': {'min': 1, 'max': 7, 'dtype': torch.float32},
         },
         params={"d": 3.0, "f": 3.0, "v": 3.0},
-        param_order = ['d', 'f', 'v']
+        param_order = ['d', 'f', 'v'],
+        hidden_size=40
     )
 
     evaluate_prediction(

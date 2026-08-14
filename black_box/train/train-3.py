@@ -8,6 +8,8 @@ from eval.spectral_compare import estimate_noise_profile, spectral_subtract
 from common.delay_ops import measure_delay, apply_shift
 from scipy.stats import skew
 
+def parse_to_subarrays(arr, group_size):
+    return [arr[i:i+group_size] for i in range(0, len(arr), group_size)] # slicing past the end of a list just returns whatever's left rather than erroring
 
 def get_symmetry(x):
     x = x.flatten()
@@ -23,10 +25,49 @@ def get_symmetry(x):
     return [skewness, pn_rms, p999Overp001]
 
 
+##########################################################################################################################################
+##########################################################################################################################################
+
 class Chunk():
-    def __init__(self, features, target):
-        self.features=features
-        self.target=target
+    def __init__(self, dry_data, wet_data=None, params={}):
+        self.dry_data=dry_data
+        self.wet_data=wet_data
+        self.params=params
+    
+    def normalize_params(self, param_configs):
+        norm_params={}
+        for k, v in self.params.items():
+            param_def = param_configs[k]
+            if param_def['dtype'] == torch.float32:
+                norm_params[k] = 2 * (v - param_def['min']) / (param_def['max'] - param_def['min']) - 1
+        return norm_params
+    
+    def get_param_tensors(self, device, param_names, param_configs):
+        norm_params = self.normalize_params(param_configs)
+        return [torch.tensor([norm_params[pn]], dtype=param_configs[pn]['dtype'], device=device) for pn in param_names]
+    
+    def get_dry_tensor(self, device):
+        return torch.from_numpy(self.dry_data).unsqueeze(0).to(device)
+
+    def get_wet_tensor(self, device):
+        if isinstance(self.wet_data, np.ndarray):
+            return torch.from_numpy(self.wet_data).unsqueeze(0).to(device) 
+        else: return None
+
+    def get_target_tensor(self, device):
+        if isinstance(self.wet_data, np.ndarray):
+            return self.get_wet_tensor(device).unsqueeze(-1)
+        else: return None
+
+    def get_features_tensor(self, device, param_names, param_configs):
+        dry_tensor = self.get_dry_tensor(device)
+        # Make dry input (batch, seq_len, 1)
+        batch, seq_len = dry_tensor.shape
+        dry_view = dry_tensor.unsqueeze(-1)
+
+        # Make param input (batch, seq_len, 1), same value repeated across time
+        param_views = [p.view(batch, 1, 1).expand(batch, seq_len, 1) for p in self.get_param_tensors(device, param_names, param_configs)]
+        return torch.cat([dry_view] + param_views, dim=-1)
 
 
 class Segment():
@@ -34,20 +75,73 @@ class Segment():
         self.chunks:list[Chunk]=chunks
         self.noise_profile=noise_profile
     
-    def input_tensor(self):
-        return torch.cat([chunk.features for chunk in self.chunks], dim=1)
+    def __len__(self):
+        return len(self.chunks)
 
-    def target_tensor(self):
-        return torch.cat([chunk.target for chunk in self.chunks], dim=1)
+    def __getitem__(self, idx):
+        return self.chunks[idx]
+    
+    def append(self, chunk):
+        self.chunks.append(chunk)
+
+    def __iter__(self):
+        return iter(self.chunks)
+    
+    def get_features_tensors(self, device, param_names, param_configs):
+        return torch.cat([chunk.get_features_tensor(device, param_names, param_configs) for chunk in self.chunks], dim=1)
+
+    def get_target_tensors(self, device):
+        target_tensor = [chunk.get_target_tensor(device) for chunk in self.chunks]
+        if None in target_tensor: return None
+        return torch.cat(target_tensor, dim=1)
+
+
+class Batch():
+    def __init__(self, segments, tag='series'): # tag is a debugging term to tell if the batch is a timeseries of segments or a time windows of segments across tracks
+        self.segments:list[Segment]=segments
+
+    def __len__(self):
+        return len(self.segments)
+
+    def __getitem__(self, idx):
+        return self.segments[idx]
+
+    def append(self, segment):
+        self.segments.append(segment)
+
+    def __iter__(self):
+        return iter(self.segments)
+
+    def shuffle(self, seed=42):
+        random.seed(seed)
+        random.shuffle(self.segments)
+
+    def get_tensors(self, device, param_names, param_configs):
+        features_tensors = torch.cat([segment.get_features_tensors(device, param_names, param_configs) for segment in self.segments], dim=0)
+        tgt=[segment.get_target_tensors(device) for segment in self.segments]
+        target_tensors = torch.cat(tgt, dim=0) if not None in tgt else None
+        return [features_tensors, target_tensors]
 
 
 class Track():
     def __init__(self, segments):
         self.segments:list[Segments]=segments
+
     def shuffle(self, seed=42):
         random.seed(seed)
         random.shuffle(self.segments)
 
+    def __len__(self):
+        return len(self.segments)
+
+    def __getitem__(self, idx):
+        return self.segments[idx]
+
+    def append(self, segment):
+        self.segments.append(segment)
+
+    def __iter__(self):
+        return iter(self.segments)
 
 class DataSet():
     def __init__(self, manifest_file, dry_file, wet_dir, chunk_seconds, param_names, param_configs, segment_length=20, silent_lead_in_seconds=8, trim_noise = True):
@@ -70,7 +164,11 @@ class DataSet():
             wet_file = wet_dir + '/' + man_record['id'] + '.wav'
             print(f"For {wet_file}")
             wet_full, wet_sr = load_wav(wet_file)
+
+            # Get params
             params=man_record['params']
+
+            # Get noise
             if trim_noise:
                 noise_profile = estimate_noise_profile(wet_full[:n_trim], wet_sr) # pre-silence
                 wet_full = spectral_subtract(wet_full, noise_profile, sr)
@@ -82,41 +180,16 @@ class DataSet():
             delay_samples, sr = measure_delay(wet_trim, dry_trim, sr, verbose=False)
             dry_aligned, wet_aligned = apply_shift(dry_full, wet_full, delay_samples)
             n_samples = len(dry_aligned)
-            print(f"n_samples {n_samples}")
-
             n_chunks = n_samples // chunk_len # number of full chunks in data
-            print(f"n_chunks {n_chunks}")
+            print(f"n_samples {n_samples} w n_chunks {n_chunks}")
 
             # Make chunks for this track
             chunk_bucket=[]
             segments=[]
-            print(f"n_chunks {n_chunks}")
             for i in range(n_chunks):
                 s = i * chunk_len
 
-                # Get chunk features / target
-                dry_tensor = torch.from_numpy(dry_aligned[s:s + chunk_len].copy()).unsqueeze(0).to(device)
-                wet_tensor = torch.from_numpy(wet_aligned[s:s + chunk_len].copy()).unsqueeze(0).to(device)
-                target_tensor = wet_tensor.unsqueeze(-1)
-
-                # normalize_params
-                norm_params={}
-                for k, v in params.items():
-                    param_def = param_configs[k]
-                    if param_def['dtype'] == torch.float32:
-                        norm_params[k] = 2 * (v - param_def['min']) / (param_def['max'] - param_def['min']) - 1
-                
-                param_tensors = [torch.tensor([norm_params[pn]], dtype=param_configs[pn]['dtype'], device=device) for pn in param_names]
-
-                # Make dry input (batch, seq_len, 1)
-                batch, seq_len = dry_tensor.shape
-                dry_view = dry_tensor.unsqueeze(-1)
-
-                # Make param input (batch, seq_len, 1), same value repeated across time
-                param_views = [p.view(batch, 1, 1).expand(batch, seq_len, 1) for p in param_tensors]
-                features_tensor = torch.cat([dry_view] + param_views, dim=-1)
-
-                chunk = Chunk(features_tensor, target_tensor)
+                chunk = Chunk(dry_aligned[s:s + chunk_len].copy(), wet_aligned[s:s + chunk_len].copy(), params)
 
                 chunk_bucket.append(chunk)
                 if (i+1) % segment_length == 0:
@@ -129,48 +202,106 @@ class DataSet():
         self.n_segments = min([len(t.segments) for t in self.tracks])
         self.tracks = [Track(track.segments[:self.n_segments]) for track in self.tracks]
 
+    def make_window_batches(self, track_size:int=30): # group for each trackset
+        # track_size = batch_size
+        # T_0 [  ][  ][  ]
+        # T_1 [t0][t1][t2]
+        # T_2 [  ][  ][  ]
+        #        +
+        # T_3 [  ][  ][  ]
+        # T_4 [t0][t1][t2]
+        # T_4 [  ][  ][  ]
+        
+        batch_groups=[]
+        for track_group in parse_to_subarrays(self.tracks, track_size):
+            batches=[]
+            for s_i in range(0, self.n_segments):
+                batches.append(Batch([track[s_i] for track in track_group], tag='window'))
+            batch_groups.append(batches)
+        return batch_groups
 
-
-    def make_track_batches(self, track_size:int=30): # group for each trackset
-
-        batch_group = []
-        for T_i in range(0, len(self.tracks), track_size):
-            batches=[]    
-            # Get set of tracks in this batch
-            tracks = self.tracks[T_i:T_i + track_size]
-
-            # Make column for s=1
-            for s_i in range(self.n_segments):
-                batch=[]
-                for track in tracks:
-                    batch.append(track.segments[s_i])
-            
-                batches.append(batch)
-            
-            batch_group.append(batches)
-        return batch_group
 
     def batches_of_random(self, batch_size=30, seed=42):
+
+        # Flatten segments
+        segments = []
+        for track in self.tracks:
+            for segment in track:
+                segments.append(segment)
+
+        # randomize segments
+        random.seed(seed)
+        random.shuffle(segments)
+
+        # batch segments
         batches = []
-        seg_bucket = []
-
-        flat_segments = []
-        for segments in [track.segments for track in self.tracks]:
-            flat_segments += segments
-        
-        for i, segment in enumerate(flat_segments):
-        
-            seg_bucket.append(segment)
-            if (i+1) % batch_size == 0:
-                batches.append(seg_bucket)
-                seg_bucket = []
-
+        for batch_segments in parse_to_subarrays(segments, batch_size):
+            batches.append(Batch(batch_segments, tag='random'))
         return batches
 
 
 ##########################################################################################################################################
 ##########################################################################################################################################
 
+class PredictionSet():
+    def __init__(
+        predict_file=None,
+        predict_data=None, params=None, sr=None,
+        predict_manifest_record=None, predict_dir=None,
+        chunk_seconds=0.03,
+        silent_lead_in_seconds=8,
+        trim_noise=True
+    ):
+        if predict_file and params:
+            predict_data, sr = load_wav(predict_file)
+            # use supplied params
+        elif predict_data and params and sr:
+            pass
+        elif predict_manifest_record and predict_dir:
+            predict_data, sr = load_wav(predict_dir + '/' + predict_manifest_record['id'] + '.wav')
+            params=man_record['params']
+        else:
+            assert False, 'invalid predict params'
+
+
+            n_trim = int(silent_lead_in_seconds * sr)
+
+
+        if trim_noise:
+            noise_profile = estimate_noise_profile(predict_data[:int(silent_lead_in_seconds * sr)], sr) # pre-silence
+            predict_data = spectral_subtract(predict_data, noise_profile, sr)
+        else: noise_profile=None
+
+        # Get noise
+        if trim_noise:
+            predict_data = spectral_subtract(predict_data, noise_profile, sr)
+        chunk_len = int(chunk_seconds * sr)
+        n_chunks = len(predict_data) // chunk_len # number of full chunks in data
+
+
+        for i in range(n_chunks):
+            s = i * chunk_len
+
+            chunk = Chunk(dry_aligned[s:s + chunk_len].copy(), wet_aligned[s:s + chunk_len].copy(), params)
+
+            chunk_bucket.append(chunk)
+            if (i+1) % segment_length == 0:
+                segments.append(Segment(chunk_bucket, noise_profile))
+                chunk_bucket = []
+        
+        self.track = Track(segments)
+    
+    def make_window_batches(self): # group for each trackset
+        track_group=[self.track]
+
+        batches=[]
+        for s_i in range(0, self.n_segments):
+            batches.append(Batch([track[s_i]], tag='window'))
+        return batches
+
+
+##########################################################################################################################################
+##########################################################################################################################################
 
 class ConditionedLSTM(nn.Module):
     def __init__(self, input_size=4, hidden_size=20, num_layers=1):
@@ -263,7 +394,7 @@ def train_manifest(
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     prepped = datetime.datetime.now()
-    print(f"Prep took {prepped - start}")
+    if verbose_time: print(f"Prep took {prepped - start}")
 
     # Modeling
     best_loss = float('inf')
@@ -279,12 +410,11 @@ def train_manifest(
         model.train()
         for batch in train_dataset.batches_of_random(): # batched segments of no specified track or ts
             # get 
-            input_batch = torch.cat([segment.input_tensor() for segment in batch], dim=0)
-            target_batch = torch.cat([segment.target_tensor() for segment in batch], dim=0)
+            features_tensors, target_tensors = batch.get_tensors(device, param_names, param_configs)
 
-            pred, _ = model(input_batch, None)
+            pred, _ = model(features_tensors, None)
             pred_for_loss = pred[:, warmup_samples:, :]
-            target_for_loss = target_batch[:, warmup_samples:, :]
+            target_for_loss = target_tensors[:, warmup_samples:, :]
             loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, dc_weight=0.5, pos_neg_weight=0.2)
             # Backprop
             optimizer.zero_grad() # clear old gradients
@@ -293,7 +423,7 @@ def train_manifest(
             optimizer.step() # apply them to the weights
 
         t_time =  datetime.datetime.now()
-        print(f"Train time: {t_time - e_time}")
+        if verbose_time: print(f"Train time: {t_time - e_time}")
 
         model.eval()
         num_tracks = len(validation_dataset.tracks)
@@ -304,22 +434,18 @@ def train_manifest(
             eval_targets = [[] for _ in range(num_tracks)]
 
             # Per Track group
-            batch_groups = validation_dataset.make_track_batches(track_size=30)
+            batch_groups = validation_dataset.make_window_batches(track_size=30)
             for batches in batch_groups:
                 for batch in batches:
-                    for segment in batch:
-
-                        input_batch = torch.cat([segment.input_tensor() for segment in batch], dim=0)
-                        target_batch = torch.cat([segment.target_tensor() for segment in batch], dim=0)
-                        pred_batch, eval_states = model(input_batch, eval_states)
-
+                    input_batch, target_batch = batch.get_tensors(device,param_names,param_configs)
+                    pred_batch, eval_states = model(input_batch, eval_states)
                     # Save pred, tgt in memory structure
                     for i, track in enumerate(batch):
                         eval_preds[i].append(pred_batch[i:i+1])
                         eval_targets[i].append(target_batch[i:i+1])
 
             p_time =  datetime.datetime.now()
-            print(f"Prediction time: {p_time - t_time}")
+            if verbose_time: print(f"Prediction time: {p_time - t_time}")
 
 
         # Validation
@@ -357,7 +483,7 @@ def train_manifest(
             print(f"{(epoch+1):02d}/{epochs:02d} |  {eval_loss:+07.3f}   {eval_esr:+07.3f} / {eval_dc:+07.3f} / {eval_pn:+07.3f} |  {pMean:+0.5f} / {pStd:+0.5f} / {pSkewness:+04.2f}  |  {tMean:+0.5f} / {tStd:+0.5f} / {tSkewness:+04.2f}")
 
         v_time =  datetime.datetime.now()
-        print(f"Validation time: {v_time - p_time}")
+        if verbose_time: print(f"Validation time: {v_time - p_time}")
 
 
         # Reset model if diverging and lower learning rate
@@ -382,6 +508,63 @@ def train_manifest(
     torch.save(best_state, f'{model_v_output_dir}/model_best.pt')
     return model
 
+def predict_track(checkpoint, track):
+    # Model info
+    device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+    model = ConditionedLSTM(input_size=len(param_names) + 1, hidden_size=hidden_size).to(device)
+    model.load_state_dict(torch.load(checkpoint, map_location=device))
+    model.eval()
+
+
+def predict_manifest(
+    checkpoint='',
+    prediction_manifest='/home/ubuntu/dsp-modeler/data/prediction/manifest.jsonl',
+    predict_dir='/home/ubuntu/dsp-modeler/data/outputs',
+    param_names=["d", "f", "v"],
+    param_configs={
+        'd':{'min':1, 'max':7, 'dtype':torch.float32},
+        'f':{'min':1, 'max':7, 'dtype':torch.float32},
+        'v':{'min':1, 'max':7, 'dtype':torch.float32},
+    },
+    silent_lead_in_seconds=8,
+    chunk_seconds=0.03,
+    device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
+    trim_noise=True,
+    track_size=30,
+    hidden_size=20
+):
+    prediction_dataset = PredictionSet(
+        predict_file=None,
+        predict_data=None, params=None, sr=None,
+        predict_manifest_record=None, predict_dir=None,
+        chunk_seconds=0.03,
+        silent_lead_in_seconds=8,
+        trim_noise=True
+    )
+
+    # Model info
+    model = ConditionedLSTM(input_size=len(param_names) + 1, hidden_size=hidden_size).to(device)
+    model.load_state_dict(torch.load(checkpoint, map_location=device))
+    model.eval()
+
+    num_tracks = len(validation_dataset.tracks)
+    with torch.no_grad():
+    # Predictions
+        eval_states = None
+        eval_preds = [[] for _ in range(num_tracks)]
+
+        # Per Track group
+        batches = prediction_dataset.make_window_batches(track_size=track_size)[0]
+        for batch in batches:
+            input_batch, _ = batch.get_tensors(device,param_names,param_configs)
+            pred_batch, eval_states = model(input_batch, eval_states)
+            # Save pred, tgt in memory structure
+            for i, track in enumerate(batch):
+                eval_preds[i].append(pred_batch[i:i+1])
+    
+    eval_pred_p = torch.cat(eval_preds[p], dim=1)
+
+    return eval_pred_p
 
 ##########################################################################################################################################
 ##########################################################################################################################################
@@ -409,5 +592,6 @@ if __name__ == '__main__':
         lr_patience = 6,
         lr_factor = 0.5,
         verbose_time=False,
-        verbose_performance = False
+        verbose_performance = False,
+        hidden_size=60
     )
