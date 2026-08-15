@@ -583,8 +583,8 @@ if __name__ == '__main__':
             'f':{'min':1, 'max':7, 'dtype':torch.float32},
             'v':{'min':1, 'max':7, 'dtype':torch.float32},
         },
-        train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl',
-        validation_manifest='/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl',
+        train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train/manifest-5.jsonl',
+        validation_manifest='/home/ubuntu/dsp-modeler/black_box/data/train/manifest-5.jsonl',
         dry_file='/home/ubuntu/dsp-modeler/data/input/input.wav',
         device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
         model_output_dir = f'/home/ubuntu/dsp-modeler/black_box/model/models',
@@ -593,5 +593,5 @@ if __name__ == '__main__':
         lr_factor = 0.5,
         verbose_time=False,
         verbose_performance = False,
-        hidden_size=60
+        hidden_size=40
     )
