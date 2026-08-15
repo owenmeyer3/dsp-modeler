@@ -110,7 +110,7 @@ if __name__ == "__main__":
     infer(
         dry_path='/home/ubuntu/dsp-modeler/data/input/input.wav',
         out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav',
-        checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/2026-08-14_23-16/model_best.pt',
+        checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/2026-08-15_00-14/model_best.pt',
         block_seconds=0.1,  # matches the order of magnitude training already ran thousands of forward passes at without incident
         param_configs={
             'd': {'min': 1, 'max': 7, 'dtype': torch.float32},

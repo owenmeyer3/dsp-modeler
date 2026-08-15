@@ -54,7 +54,9 @@ def _block_powers(data, sr, weighted=True):
 def estimate_noise_profile(noise_sample, sr, nperseg=2048):
     """Average magnitude spectrum from a known-silent region -- the
     noise's own frequency-domain fingerprint, across the whole spectrum,
-    not just a single band."""
+    not just a single band.
+    n_freq_bins = nperseg // 2 + 1
+    """
     _, _, Zxx = stft(noise_sample, fs=sr, nperseg=nperseg)
     return np.mean(np.abs(Zxx), axis=1, keepdims=True)  # (n_freq_bins, 1)
 

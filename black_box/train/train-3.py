@@ -142,11 +142,37 @@ class Track():
 
     def __iter__(self):
         return iter(self.segments)
+    
+    def get_dry(self):
+        chunks_data = [chunk.dry_data for segment in self.segments for chunk in segment]
+        return np.concatenate(chunks_data)
+        # data=[]
+        # for segment in self.segments:
+        #     for chunk in segment:
+        #         data += chunk.dry_data
+        
+    def get_wet(self):
+        chunks_data = [chunk.wet_data for segment in self.segments for chunk in segment]
+        return np.concatenate(chunks_data)
+        # data=[]
+        # for segment in self.segments:
+        #     for chunk in segment:
+        #         data += chunk.wet_data
+
+    def compute_wet_gain(self):
+        rms_d = np.sqrt(np.mean(self.get_dry() ** 2))
+        rms_w = np.sqrt(np.mean(self.get_wet() ** 2))
+        return rms_w / rms_d
 
 class DataSet():
-    def __init__(self, manifest_file, dry_file, wet_dir, chunk_seconds, param_names, param_configs, segment_length=20, silent_lead_in_seconds=8, trim_noise = True):
+    def __init__(self, manifest_file, dry_file, wet_dir, chunk_seconds, param_names, param_configs, segment_size=20, silent_lead_in_seconds=8, trim_noise = True):
         self.tracks = []
         self.n_segments = 0
+        self.chunk_seconds = chunk_seconds
+        self.param_names = param_names
+        self.param_configs = param_configs
+        self.segment_size = segment_size
+        self.silent_lead_in_seconds = silent_lead_in_seconds
         device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
 
         track_segments = []
@@ -192,7 +218,7 @@ class DataSet():
                 chunk = Chunk(dry_aligned[s:s + chunk_len].copy(), wet_aligned[s:s + chunk_len].copy(), params)
 
                 chunk_bucket.append(chunk)
-                if (i+1) % segment_length == 0:
+                if (i+1) % segment_size == 0:
                     segments.append(Segment(chunk_bucket, noise_profile))
                     chunk_bucket = []
             
@@ -238,6 +264,18 @@ class DataSet():
         for batch_segments in parse_to_subarrays(segments, batch_size):
             batches.append(Batch(batch_segments, tag='random'))
         return batches
+    
+    def __len__(self):
+        return len(self.tracks)
+
+    def __getitem__(self, idx):
+        return self.tracks[idx]
+
+    def append(self, track):
+        self.tracks.append(track)
+
+    def __iter__(self):
+        return iter(self.tracks)
 
 
 ##########################################################################################################################################
@@ -348,6 +386,180 @@ def combined_loss(pred, target, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=
 
 ##########################################################################################################################################
 ##########################################################################################################################################
+from scipy.spatial import cKDTree
+# This model currently ingests unscaled parameters. Given all knobs have the same range, 
+# this doesnt't bias toward any knob. Worth addressing for other models. 
+
+class TrackDataModel(object):
+    def __init__(self, k=8, bandwidth=0.3):
+        self.tree=None
+        self.noise_profiles=None # (# tracks, # n_freq_bins)
+        self.gain_vals=None # (# tracks, 1)
+        self.param_vals=None
+        self.bandwidth=bandwidth
+        self.k=k
+        super().__init__()
+    
+    def train(self, train_dataset:DataSet):
+        self.param_vals = [] # (# tracks, # params)
+        self.noise_profiles = []
+        self.gain_vals = []
+        for track in train_dataset:
+            segment_0 = track[0]
+            chunk_0 = segment_0[0]
+            norm_params = chunk_0.normalize_params(train_dataset.param_configs)
+            pv = [norm_params[pn] for pn in norm_params]
+            self.param_vals.append(pv)
+            self.noise_profiles.append(segment_0.noise_profile.flatten())
+            self.gain_vals.append(track.compute_wet_gain())
+
+        self.param_vals = np.array(self.param_vals)
+        self.noise_profiles = np.array(self.noise_profiles)
+        self.gain_vals = np.array(self.gain_vals)
+        self.tree = cKDTree(self.param_vals)
+
+    def validate(self, validation_dataset:DataSet):
+        for i, track in enumerate(validation_dataset):
+            segment_0 = track[0]
+            chunk_0 = segment_0[0]
+            norm_params = chunk_0.normalize_params(validation_dataset.param_configs)
+            query_params = [norm_params[pn] for pn in norm_params]
+            predicted_noise_profile, predicted_gain = self.predict(query_params)
+            actual_noise_profile = segment_0.noise_profile
+            actual_gain = track.compute_wet_gain()
+
+            print(f'Track {i}')
+            print(f'noise_profile {predicted_noise_profile} vs. {actual_noise_profile}')
+            print(f'gain {predicted_gain} vs. {actual_gain}')
+
+
+    def predict(self, query_params):
+        distances, indices = self.tree.query(query_params, k=self.k)
+        weights = np.exp(-(distances**2) / (2 * self.bandwidth**2))
+        weights /= weights.sum()
+
+        neighbor_noise_profiles = self.noise_profiles[indices]  # (k, n_freq_bins)
+        predicted_noise_profile = (weights[:, None] * neighbor_noise_profiles).sum(axis=0)
+
+        neighbor_gains = self.gain_vals[indices]               # (k,)
+        predicted_gain = (weights * neighbor_gains).sum()
+
+        return predicted_noise_profile, predicted_gain
+    
+    def save(self, model_output_dir):
+        model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
+        os.makedirs(model_v_output_dir, exist_ok=True)
+        np.savez(
+            f'{model_v_output_dir}/track_model.npz',
+            param_vals=self.param_vals,
+            noise_profiles=self.noise_profiles,
+            gain_vals=self.gain_vals
+        )
+
+    def load(self, model_path):
+        data = np.load(model_path)
+        self.param_vals = data['param_vals']
+        self.noise_profiles = data['noise_profiles']
+        self.gain_vals = data['gain_vals']
+        self.tree = cKDTree(self.param_vals)  # cheap to rebuild from scratch every time
+
+##########################################################################################################################################
+##########################################################################################################################################
+
+from scipy.spatial import cKDTree
+# This model currently ingests unscaled parameters. Given all knobs have the same range, 
+# this doesnt't bias toward any knob. Worth addressing for other models. 
+
+class TrackDataModel2(object):
+    def __init__(self, k=8, bandwidth=0.5):
+        self.tree=None
+        self.noise_profiles=None # (# tracks, # n_freq_bins)
+        self.gain_vals=None # (# tracks, 1)
+        self.param_vals=None
+        self.bandwidth=bandwidth
+        self.k=k
+        super().__init__()
+    
+    def train(self, train_dataset:DataSet):
+        self.param_vals = [] # (# tracks, # params)
+        self.noise_profiles = []
+        self.gain_vals = []
+        for track in train_dataset:
+            segment_0 = track[0]
+            chunk_0 = segment_0[0]
+            norm_params = chunk_0.normalize_params(train_dataset.param_configs)
+            pv = [norm_params[pn] for pn in norm_params]
+            self.param_vals.append(pv)
+            self.noise_profiles.append(segment_0.noise_profile.flatten())
+            self.gain_vals.append(track.compute_wet_gain())
+
+        self.param_vals = np.array(self.param_vals)
+        self.noise_profiles = np.array(self.noise_profiles)
+        self.gain_vals = np.array(self.gain_vals)
+        self.tree = cKDTree(self.param_vals)
+
+    def validate(self, validation_dataset:DataSet):
+        for i, track in enumerate(validation_dataset):
+            segment_0 = track[0]
+            chunk_0 = segment_0[0]
+            norm_params = chunk_0.normalize_params(validation_dataset.param_configs)
+            query_params = [norm_params[pn] for pn in norm_params]
+            predicted_noise_profile, predicted_gain = self.predict(query_params)
+            actual_noise_profile = segment_0.noise_profile
+            actual_gain = track.compute_wet_gain()
+
+            print(f'Track {i}')
+            print(f'noise_profile {predicted_noise_profile} vs. {actual_noise_profile}')
+            print(f'gain {predicted_gain} vs. {actual_gain}')
+
+
+    def predict(self, query_params):
+        distances, indices = self.tree.query(query_params, k=self.k)
+        weights = np.exp(-(distances**2) / (2 * self.bandwidth**2))
+        # weights /= weights.sum()
+
+        X = np.hstack([np.ones((self.k, 1)), self.param_vals[indices]]) # (k, 4) -- [bias, d, f, v]
+        sw = np.sqrt(weights)
+        Xw = X * sw[:, None]
+        query_row = np.concatenate([[1.0], query_params])
+
+        # Gain (scalar target)
+        # yw_gain = self.gain_vals[indices] * sw
+        yw_gain = np.log(self.gain_vals[indices]) * sw
+        gain_coeffs, *_ = np.linalg.lstsq(Xw, yw_gain, rcond=None)          # weighted least squares
+        predicted_gain = query_row @ gain_coeffs
+
+        # Noise profile (vector target -- fit every bin in one call)
+        # yw_noise_profile = self.noise_profiles[indices] * sw[:, None]           # (k, n_freq_bins)
+        yw_noise_profile = np.log(self.noise_profiles[indices]) * sw[:, None]           # (k, n_freq_bins)
+        profile_coeffs, *_ = np.linalg.lstsq(Xw, yw_noise_profile, rcond=None)  # (4, n_freq_bins)
+        predicted_noise_profile = query_row @ profile_coeffs               # (n_freq_bins,)
+
+        print(f"predicted_gain: {predicted_gain}")
+        print(f"predicted_noise_profile: {predicted_noise_profile}")
+
+        return predicted_noise_profile, predicted_gain
+
+    
+    def save(self, model_output_dir):
+        model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
+        os.makedirs(model_v_output_dir, exist_ok=True)
+        np.savez(
+            f'{model_v_output_dir}/track_model.npz',
+            param_vals=self.param_vals,
+            noise_profiles=self.noise_profiles,
+            gain_vals=self.gain_vals
+        )
+
+    def load(self, model_path):
+        data = np.load(model_path)
+        self.param_vals = data['param_vals']
+        self.noise_profiles = data['noise_profiles']
+        self.gain_vals = data['gain_vals']
+        self.tree = cKDTree(self.param_vals)  # cheap to rebuild from scratch every time
+
+##########################################################################################################################################
+##########################################################################################################################################
 
 
 def train_manifest(
@@ -415,7 +627,7 @@ def train_manifest(
             pred, _ = model(features_tensors, None)
             pred_for_loss = pred[:, warmup_samples:, :]
             target_for_loss = target_tensors[:, warmup_samples:, :]
-            loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, dc_weight=0.5, pos_neg_weight=0.2)
+            loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, dc_weight=0.5, pos_neg_weight=0.2, segment_size=train_dataset.segment_size)
             # Backprop
             optimizer.zero_grad() # clear old gradients
             loss.backward() # compute fresh gradients for this accumulated window only
@@ -453,7 +665,7 @@ def train_manifest(
             for p in range(num_tracks):
                 eval_pred_p = torch.cat(eval_preds[p], dim=1)
                 eval_target_p = torch.cat(eval_targets[p], dim=1)
-                eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred_p, eval_target_p, dc_weight=0.5, pos_neg_weight=0.2)
+                eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred_p, eval_target_p, dc_weight=0.5, pos_neg_weight=0.2, segment_size=validation_dataset.segment_size)
                 eval_losss += eval_loss.item()
                 eval_esrs += eval_esr.item()
                 eval_dcs += eval_dc.item()
@@ -570,28 +782,40 @@ def predict_manifest(
 ##########################################################################################################################################
 
 if __name__ == '__main__':
-    train_manifest(
-        wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
-        learning_rate=5e-4,
-        epochs=20,
-        warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
-        silent_lead_in_seconds=8,
-        chunk_seconds=0.03,
-        param_names=["d", "f", "v"],
-        param_configs={
-            'd':{'min':1, 'max':7, 'dtype':torch.float32},
-            'f':{'min':1, 'max':7, 'dtype':torch.float32},
-            'v':{'min':1, 'max':7, 'dtype':torch.float32},
-        },
-        train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train/manifest-5.jsonl',
-        validation_manifest='/home/ubuntu/dsp-modeler/black_box/data/train/manifest-5.jsonl',
-        dry_file='/home/ubuntu/dsp-modeler/data/input/input.wav',
-        device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-        model_output_dir = f'/home/ubuntu/dsp-modeler/black_box/model/models',
-        trim_noise=True,
-        lr_patience = 6,
-        lr_factor = 0.5,
-        verbose_time=False,
-        verbose_performance = False,
-        hidden_size=40
-    )
+    # train_manifest(
+    #     wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
+    #     learning_rate=5e-4,
+    #     epochs=20,
+    #     warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
+    #     silent_lead_in_seconds=8,
+    #     chunk_seconds=0.03,
+    #     param_names=["d", "f", "v"],
+    #     param_configs={
+    #         'd':{'min':1, 'max':7, 'dtype':torch.float32},
+    #         'f':{'min':1, 'max':7, 'dtype':torch.float32},
+    #         'v':{'min':1, 'max':7, 'dtype':torch.float32},
+    #     },
+    #     train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train/manifest.jsonl',
+    #     validation_manifest='/home/ubuntu/dsp-modeler/black_box/data/validation/manifest-15.jsonl',
+    #     dry_file='/home/ubuntu/dsp-modeler/data/input/input.wav',
+    #     device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
+    #     model_output_dir = f'/home/ubuntu/dsp-modeler/black_box/model/models',
+    #     trim_noise=True,
+    #     lr_patience = 6,
+    #     lr_factor = 0.5,
+    #     verbose_time=False,
+    #     verbose_performance = False,
+    #     hidden_size=40
+    # )
+
+    track_data_model = TrackDataModel2(k=5, bandwidth=0.5)
+
+    # train_dataset = DataSet('/home/ubuntu/dsp-modeler/black_box/data/train/manifest.jsonl', '/home/ubuntu/dsp-modeler/data/input/input.wav', '/home/ubuntu/dsp-modeler/data/outputs', 0.03, ["d", "f", "v"], {'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, silent_lead_in_seconds=8, trim_noise = True)
+    # validation_dataset = DataSet('/home/ubuntu/dsp-modeler/black_box/data/validation/manifest.jsonl', '/home/ubuntu/dsp-modeler/data/input/input.wav', '/home/ubuntu/dsp-modeler/data/outputs', 0.03, ["d", "f", "v"], {'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, silent_lead_in_seconds=8, trim_noise = True)
+
+    train_dataset = DataSet('/home/ubuntu/dsp-modeler/black_box/data/validation/manifest.jsonl', '/home/ubuntu/dsp-modeler/data/input/input.wav', '/home/ubuntu/dsp-modeler/data/outputs', 0.03, ["d", "f", "v"], {'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, silent_lead_in_seconds=8, trim_noise = True)
+    validation_dataset = DataSet('/home/ubuntu/dsp-modeler/black_box/data/train/manifest-5.jsonl', '/home/ubuntu/dsp-modeler/data/input/input.wav', '/home/ubuntu/dsp-modeler/data/outputs', 0.03, ["d", "f", "v"], {'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, silent_lead_in_seconds=8, trim_noise = True)
+    
+    track_data_model.train(train_dataset)
+    track_data_model.save(f'/home/ubuntu/dsp-modeler/black_box/model/track_models')
+    track_data_model.validate(validation_dataset)

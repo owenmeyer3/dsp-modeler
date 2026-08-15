@@ -126,7 +126,7 @@ def normalize_params(params, param_configs):
 #     whichever happens to be louder)."""
 #     return torch.sum((pred - target) ** 2) / (torch.sum(target ** 2) + eps)
 
-def esr_loss(pred, target, eps=1e-8, min_energy=1e-4):
+def esr_loss(pred, target, eps=1e-8, min_energy=1e-4, batch_size=None):
     energy = torch.sum(target ** 2)
     return torch.sum((pred - target) ** 2) / (torch.maximum(energy, torch.tensor(min_energy)) + eps)
 
@@ -145,10 +145,32 @@ def pos_neg_balance_loss(pred, target, eps=1e-8):
     target_neg_rms = torch.sqrt((target.clamp(max=0) ** 2).mean() + eps)
     return ((pred_pos_rms - target_pos_rms) ** 2 + (pred_neg_rms - target_neg_rms) ** 2) / target_var
 
-def combined_loss(pred, target, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=0.0):
-    esr = esr_loss(pred, target)
-    dc = dc_loss(pred, target)
-    pos_neg_balance = pos_neg_balance_loss(pred, target)
+def combined_loss(pred, target, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=0.0, segment_size=None):
+
+    # Split batch into segments and calculate losses on segments separately
+    if batch_size:
+
+        batch_length = len(pred)
+        assert batch_length % segment_size == 0, 'predictions length must be a multiple of segment_size'
+        
+        esr_losses, dc_losses, pos_neg_balance_losses = [], [], []
+        for i in range(0, batch_length, segment_size):
+            seg_pred = pred[i:i+segment_size]
+            seg_target = target[i:i+segment_size]
+
+            esr_losses.append(esr_loss(seg_pred, seg_target))
+            dc_losses.append(dc_loss(seg_pred, seg_target))
+            pos_neg_balance_losses.append(pos_neg_balance_loss(seg_pred, seg_target))
+        
+        esr = torch.stack(esr_losses).mean()
+        dc = torch.stack(dc_losses).mean()
+        pos_neg_balance = torch.stack(pos_neg_balance_losses).mean()
+
+    # Calculate losses on batch in entirety
+    else:
+        esr = esr_loss(pred, target)
+        dc = dc_loss(pred, target)
+        pos_neg_balance = pos_neg_balance_loss(pred, target)
 
     return [
         esr + dc_weight * dc + pos_neg_weight * pos_neg_balance,
