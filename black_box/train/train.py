@@ -1,29 +1,15 @@
-"""
-train.py
-
-Training skeleton for the ConditionedLSTM model, using truncated
-backpropagation through time (TBPTT). Your files are multi-minute audio
-at 96kHz -- way too long to backprop through in one shot (both memory
-and gradient-stability reasons), so we chop each file into short chunks,
-carry the LSTM's hidden state across chunks within the same file, but
-only backprop within each chunk.
-
-Expects a file naming convention like: v3_d5_f2_dry.wav / v3_d5_f2_wet.wav
--- adjust `parse_params_from_filename` to match whatever convention you
-actually used when capturing your dataset.
-"""
-import os, torch, json, uuid, datetime, copy, random
+import json, torch, random, datetime, copy, os
 import torch.optim as optim
-from scipy.io import wavfile
+import torch.nn as nn
 import numpy as np
-from black_box.model.model import ConditionedLSTM, make_conditioned_input, normalize_params, combined_loss
-# from common.alignment import estimate_shift, apply_shift
-from common.delay_ops import measure_delay, apply_shift
+from black_box.model.model import ConditionedLSTM, combined_loss
 from common.utils import load_wav
-import eval.spectral_compare as sc
+from eval.spectral_compare import estimate_noise_profile, spectral_subtract
+from common.delay_ops import measure_delay, apply_shift
 from scipy.stats import skew
-from torch.profiler import profile, ProfilerActivity
-from contextlib import nullcontext
+
+def parse_to_subarrays(arr, group_size):
+    return [arr[i:i+group_size] for i in range(0, len(arr), group_size)] # slicing past the end of a list just returns whatever's left rather than erroring
 
 def get_symmetry(x):
     x = x.flatten()
@@ -38,406 +24,541 @@ def get_symmetry(x):
     p999Overp001 = p99_9/abs(p0_1)
     return [skewness, pn_rms, p999Overp001]
 
-class PedalDataset(torch.utils.data.Dataset):
-    """Loads the single shared dry reference (DRY_FILENAME) once, then
-    pairs it against every OTHER wav file in data_dir -- each of those
-    is treated as a wet take for some parameter combination. Since the
-    dry signal is identical for every take, it's only loaded/trimmed a
-    single time and reused across all wet files."""
- 
-    def __init__(
-        self, 
-        train_manifest,
-        wet_dir,
-        param_names,
-        dry_filename, 
-        param_configs,
-        chunk_seconds=0.1,
-        silent_lead_in_seconds=8 
-    ):
-        self.param_names=param_names
-        self.param_configs=param_configs
-        self.chunks = []  # list of (dry_chunk, wet_chunk, v, d, f)
 
-        # load dry wav
-        dry_full, sr = load_wav(dry_filename)
+##########################################################################################################################################
+##########################################################################################################################################
 
-        # preprocess
+class Chunk():
+    def __init__(self, dry_data, wet_data=None, params={}):
+        self.dry_data=dry_data
+        self.wet_data=wet_data
+        self.params=params
+    
+    def normalize_params(self, param_configs):
+        norm_params={}
+        for k, v in self.params.items():
+            param_def = param_configs[k]
+            if param_def['dtype'] == torch.float32:
+                norm_params[k] = 2 * (v - param_def['min']) / (param_def['max'] - param_def['min']) - 1
+        return norm_params
+    
+    def get_param_tensors(self, device, param_names, param_configs):
+        norm_params = self.normalize_params(param_configs)
+        return [torch.tensor([norm_params[pn]], dtype=param_configs[pn]['dtype'], device=device) for pn in param_names]
+    
+    def get_dry_tensor(self, device):
+        return torch.from_numpy(self.dry_data).unsqueeze(0).to(device)
+
+    def get_wet_tensor(self, device):
+        if isinstance(self.wet_data, np.ndarray):
+            return torch.from_numpy(self.wet_data).unsqueeze(0).to(device) 
+        else: return None
+
+    def get_target_tensor(self, device):
+        if isinstance(self.wet_data, np.ndarray):
+            return self.get_wet_tensor(device).unsqueeze(-1)
+        else: return None
+
+    def get_features_tensor(self, device, param_names, param_configs):
+        dry_tensor = self.get_dry_tensor(device)
+        # Make dry input (batch, seq_len, 1)
+        batch, seq_len = dry_tensor.shape
+        dry_view = dry_tensor.unsqueeze(-1)
+
+        # Make param input (batch, seq_len, 1), same value repeated across time
+        param_views = [p.view(batch, 1, 1).expand(batch, seq_len, 1) for p in self.get_param_tensors(device, param_names, param_configs)]
+        return torch.cat([dry_view] + param_views, dim=-1)
+
+
+class Segment():
+    def __init__(self, chunks, noise_profile=None):
+        self.chunks:list[Chunk]=chunks
+        self.noise_profile=noise_profile
+    
+    def __len__(self):
+        return len(self.chunks)
+
+    def __getitem__(self, idx):
+        return self.chunks[idx]
+    
+    def append(self, chunk):
+        self.chunks.append(chunk)
+
+    def __iter__(self):
+        return iter(self.chunks)
+    
+    def get_features_tensors(self, device, param_names, param_configs):
+        return torch.cat([chunk.get_features_tensor(device, param_names, param_configs) for chunk in self.chunks], dim=1)
+
+    def get_target_tensors(self, device):
+        target_tensor = [chunk.get_target_tensor(device) for chunk in self.chunks]
+        if None in target_tensor: return None
+        return torch.cat(target_tensor, dim=1)
+
+
+class Batch():
+    def __init__(self, segments, tag='series'): # tag is a debugging term to tell if the batch is a timeseries of segments or a time windows of segments across tracks
+        self.segments:list[Segment]=segments
+
+    def __len__(self):
+        return len(self.segments)
+
+    def __getitem__(self, idx):
+        return self.segments[idx]
+
+    def append(self, segment):
+        self.segments.append(segment)
+
+    def __iter__(self):
+        return iter(self.segments)
+
+    def shuffle(self, seed=42):
+        random.seed(seed)
+        random.shuffle(self.segments)
+
+    def get_tensors(self, device, param_names, param_configs):
+        features_tensors = torch.cat([segment.get_features_tensors(device, param_names, param_configs) for segment in self.segments], dim=0)
+        tgt=[segment.get_target_tensors(device) for segment in self.segments]
+        target_tensors = torch.cat(tgt, dim=0) if not None in tgt else None
+        return [features_tensors, target_tensors]
+
+
+class Track():
+    def __init__(self, segments):
+        self.segments:list[Segments]=segments
+
+    def shuffle(self, seed=42):
+        random.seed(seed)
+        random.shuffle(self.segments)
+
+    def __len__(self):
+        return len(self.segments)
+
+    def __getitem__(self, idx):
+        return self.segments[idx]
+
+    def append(self, segment):
+        self.segments.append(segment)
+
+    def __iter__(self):
+        return iter(self.segments)
+    
+    def get_dry(self):
+        chunks_data = [chunk.dry_data for segment in self.segments for chunk in segment]
+        return np.concatenate(chunks_data)
+        # data=[]
+        # for segment in self.segments:
+        #     for chunk in segment:
+        #         data += chunk.dry_data
+        
+    def get_wet(self):
+        chunks_data = [chunk.wet_data for segment in self.segments for chunk in segment]
+        return np.concatenate(chunks_data)
+        # data=[]
+        # for segment in self.segments:
+        #     for chunk in segment:
+        #         data += chunk.wet_data
+
+    def compute_wet_gain(self):
+        rms_d = np.sqrt(np.mean(self.get_dry() ** 2))
+        rms_w = np.sqrt(np.mean(self.get_wet() ** 2))
+        return rms_w / rms_d
+
+class DataSet():
+    def __init__(self, manifest_file, dry_file, wet_dir, chunk_seconds, param_names, param_configs, segment_size=20, silent_lead_in_seconds=8, trim_noise = True):
+        self.tracks = []
+        self.n_segments = 0
+        self.chunk_seconds = chunk_seconds
+        self.param_names = param_names
+        self.param_configs = param_configs
+        self.segment_size = segment_size
+        self.silent_lead_in_seconds = silent_lead_in_seconds
+        device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+
+        track_segments = []
+
+        # Get dry data
+        dry_full, sr = load_wav(dry_file)
         n_trim = int(silent_lead_in_seconds * sr)
         dry_trim = dry_full[n_trim:]
         chunk_len = int(chunk_seconds * sr)
 
-        # get training records
-        wet_records = []
-        with open(train_manifest, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                wet_records.append(record)
+        # Get wet data
+        with open(manifest_file, 'r') as f:
+            man_records = [json.loads(line) for line in f if line.strip()]
+        for man_record in man_records:
+            wet_file = wet_dir + '/' + man_record['id'] + '.wav'
+            print(f"For {wet_file}")
+            wet_full, wet_sr = load_wav(wet_file)
 
-        for wr in wet_records:
-            wet_params = wr['params']
-            wet_path = wet_dir + '/' + wr['id'] + '.wav'
-            wet_full, wet_sr = load_wav(wet_path)
-            assert wet_sr == sr, f"{wet_path} has a different sample rate than {dry_filename}"
+            # Get params
+            params=man_record['params']
 
-            noise_profile = sc.estimate_noise_profile(wet_full, wet_sr) # pre-silence
-            wet_dn_full = sc.spectral_subtract(wet_full, noise_profile, sr)
-
-            # preprocess
+            # Get noise
+            if trim_noise:
+                noise_profile = estimate_noise_profile(wet_full[:n_trim], wet_sr) # pre-silence
+                wet_full = spectral_subtract(wet_full, noise_profile, sr)
+            else: noise_profile=None
+            assert wet_sr == sr, f"{wet_file} has a different sample rate than {dry_file}"
             wet_trim = wet_full[n_trim:]
 
+            # Align dry and wet
             delay_samples, sr = measure_delay(wet_trim, dry_trim, sr, verbose=False)
             dry_aligned, wet_aligned = apply_shift(dry_full, wet_full, delay_samples)
-            n = len(dry_aligned)
-            n_chunks = n // chunk_len
+            n_samples = len(dry_aligned)
+            n_chunks = n_samples // chunk_len # number of full chunks in data
+            print(f"n_samples {n_samples} w n_chunks {n_chunks}")
 
+            # Make chunks for this track
+            chunk_bucket=[]
+            segments=[]
             for i in range(n_chunks):
                 s = i * chunk_len
-                self.chunks.append((
-                    dry_aligned[s:s + chunk_len],
-                    wet_aligned[s:s + chunk_len],
-                    wet_params
-                ))
 
-    def __len__(self):
-        return len(self.chunks)
- 
-    def __getitem__(self, idx):
-        dry, wet, wet_params = self.chunks[idx]
+                chunk = Chunk(dry_aligned[s:s + chunk_len].copy(), wet_aligned[s:s + chunk_len].copy(), params)
 
-        param_tensors = []
-        for pn in self.param_names:
-            val = wet_params[pn]
-            dtype = self.param_configs[pn]['dtype']
-            param_tensors.append(torch.tensor(val, dtype=dtype))
+                chunk_bucket.append(chunk)
+                if (i+1) % segment_size == 0:
+                    segments.append(Segment(chunk_bucket, noise_profile))
+                    chunk_bucket = []
+            
+            self.tracks.append(Track(segments))
+            del dry_aligned, wet_aligned, wet_full   # explicitly drop the full-track arrays now that chunking is done
         
-        tensors = tuple(
-            [torch.from_numpy(dry.copy()), torch.from_numpy(wet.copy())] + \
-            param_tensors \
-        )
+        # resize tracks to equal length
+        self.n_segments = min([len(t.segments) for t in self.tracks])
+        self.tracks = [Track(track.segments[:self.n_segments]) for track in self.tracks]
+
+    def make_window_batches(self, track_size:int=30): # group for each trackset
+        # track_size = batch_size
+        # T_0 [  ][  ][  ]
+        # T_1 [t0][t1][t2]
+        # T_2 [  ][  ][  ]
+        #        +
+        # T_3 [  ][  ][  ]
+        # T_4 [t0][t1][t2]
+        # T_4 [  ][  ][  ]
+        
+        batch_groups=[]
+        for track_group in parse_to_subarrays(self.tracks, track_size):
+            batches=[]
+            for s_i in range(0, self.n_segments):
+                batches.append(Batch([track[s_i] for track in track_group], tag='window'))
+            batch_groups.append(batches)
+        return batch_groups
 
 
+    def batches_of_random(self, batch_size=30, seed=42):
+
+        # Flatten segments
+        segments = []
+        for track in self.tracks:
+            for segment in track:
+                segments.append(segment)
+
+        # randomize segments
+        random.seed(seed)
+        random.shuffle(segments)
+
+        # batch segments
+        batches = []
+        for batch_segments in parse_to_subarrays(segments, batch_size):
+            batches.append(Batch(batch_segments, tag='random'))
+        return batches
+    
+    def __len__(self):
+        return len(self.tracks)
+
+    def __getitem__(self, idx):
+        return self.tracks[idx]
+
+    def append(self, track):
+        self.tracks.append(track)
+
+    def __iter__(self):
+        return iter(self.tracks)
 
 
+##########################################################################################################################################
+##########################################################################################################################################
 
-def train(
-    batch_size=40,
-    learning_rate = 5e-4,
-    epochs=100,
-    warmup_samples=1000, # let the LSTM "settle" into a chunk before computing loss on it,  so early timesteps with poor hidden state don't dominate the gradient
-    silent_lead_in_seconds=8, # matches your capture convention - trim useless noise signal
-    chunk_seconds=0.1, # TBPTT chunk length - audio ML commonly uses ~2048-4096 samples; at 96kHz - that's roughly 20-40ms -- start small / tune based on your GPU memory
-    param_names=["d", "f", "v"],
-    target="dry",
-    param_configs={
-        'd':{'min':1, 'max':7, 'dtype':torch.float32},
-        'f':{'min':1, 'max':7, 'dtype':torch.float32},
-        'v':{'min':1, 'max':7, 'dtype':torch.float32},
-    },
-    train_manifest = '/home/ubuntu/dsp-modeler/data/train/manifest.json',
-    dry_filename = '/home/ubuntu/dsp-modeler/data/input/input.wav',
-    wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
-    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu',
-    model_output_dir='',
-    verbose_time=False,
-    verbose_performance = False
-):
+class PredictionSet():
+    def __init__(
+        predict_file=None,
+        predict_data=None, params=None, sr=None,
+        predict_manifest_record=None, predict_dir=None,
+        chunk_seconds=0.03,
+        silent_lead_in_seconds=8,
+        trim_noise=True
+    ):
+        if predict_file and params:
+            predict_data, sr = load_wav(predict_file)
+            # use supplied params
+        elif predict_data and params and sr:
+            pass
+        elif predict_manifest_record and predict_dir:
+            predict_data, sr = load_wav(predict_dir + '/' + predict_manifest_record['id'] + '.wav')
+            params=man_record['params']
+        else:
+            assert False, 'invalid predict params'
 
-    print(f"device {device}")
-    model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
-    os.makedirs(model_v_output_dir, exist_ok=True)
-    dataset = PedalDataset(
-         train_manifest=train_manifest,
-         wet_dir=wet_dir,
-         param_names=param_names,
-         dry_filename=dry_filename, 
-         param_configs=param_configs, 
-         chunk_seconds=chunk_seconds,
-         silent_lead_in_seconds=silent_lead_in_seconds 
-    )
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
-    model = ConditionedLSTM(input_size=4, hidden_size=20).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    best_loss = float('inf')
-    best_state = None
-    bad_epochs_count = 0
+            n_trim = int(silent_lead_in_seconds * sr)
 
-    for epoch in range(epochs):
-        model.train()
-        epoch_loss = 0.0
 
-        for dry, wet, *params in loader:
-            dry, wet = dry.to(device), wet.to(device)
-            params = [p.to(device) for p in params]
-            x = make_conditioned_input(dry, params)
-            target = wet.unsqueeze(-1)
-            pred, _ = model(x) # hidden=None -> fresh state per chunk; see note below for stateful alternative
+        if trim_noise:
+            noise_profile = estimate_noise_profile(predict_data[:int(silent_lead_in_seconds * sr)], sr) # pre-silence
+            predict_data = spectral_subtract(predict_data, noise_profile, sr)
+        else: noise_profile=None
 
-            # Skip the warmup region when computing loss so the model
-            # isn't penalized before its hidden state has "caught up"
-            loss = combined_loss(pred[:, warmup_samples:, :], target[:, warmup_samples:, :])
+        # Get noise
+        if trim_noise:
+            predict_data = spectral_subtract(predict_data, noise_profile, sr)
+        chunk_len = int(chunk_seconds * sr)
+        n_chunks = len(predict_data) // chunk_len # number of full chunks in data
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-            epoch_loss += loss.item()
-
-        avg_loss = epoch_loss / len(loader)
-        scheduler.step(avg_loss)
-        print(f"{epoch+1}/{epochs}: ESR+DC L = {avg_loss:9.3f}  | P mean/std: {pred.mean().item():.5f}/{pred.std().item():.5f}  | T mean/std: {target.mean().item():.5f}/{target.std().item():.5f}")
-
-        if (epoch + 1) % 10 == 0:
-            torch.save(model.state_dict(), f'{model_v_output_dir}/checkpoint_epoch{epoch+1}.pt')
-
-    torch.save(model.state_dict(), f'{model_v_output_dir}/model_final.pt')
-    return model
-
-def train_stateful_single_file(
-    wet_dir,
-    learning_rate=5e-4,
-    epochs=10,
-    warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
-    silent_lead_in_seconds=8,
-    chunk_seconds=0.03,
-    param_names=["d", "f", "v"],
-    param_configs={
-        'd':{'min':1, 'max':7, 'dtype':torch.float32},
-        'f':{'min':1, 'max':7, 'dtype':torch.float32},
-        'v':{'min':1, 'max':7, 'dtype':torch.float32},
-    },
-    train_manifest='/home/ubuntu/dsp-modeler/data/train/manifest.jsonl',
-    dry_filename='/home/ubuntu/dsp-modeler/data/input/input.wav',
-    device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-    model_output_dir='',
-    trim_noise=True,
-    verbose_time=False,
-    verbose_performance = False 
-):
-    """
-    Diagnostic variant of train(): processes ONE file's chunks in
-    sequential order (no shuffling, no batching across files) and carries
-    the LSTM's hidden state from one chunk to the next, detaching between
-    chunks to truncate backprop -- real TBPTT. hidden is reset to None only once,
-    at the start of each epoch's pass over the file.
-
-    Assumes train_manifest's first line is the file to test against.
-    """
-    print(f"device {device}")
-    model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
-    os.makedirs(model_v_output_dir, exist_ok=True)
-    best_loss = float('inf')
-    best_state = None
-    bad_epochs_count = 0
-
-    # Get dry data
-    dry_full, sr = load_wav(dry_filename)
-    n_trim = int(silent_lead_in_seconds * sr)
-    dry_trim = dry_full[n_trim:]
-    chunk_len = int(chunk_seconds * sr)
-
-    # Get (opt: noiseless) wet data
-    with open(train_manifest, 'r') as f:
-        record = json.loads(f.readline())
-    wet_path = wet_dir + '/' + record['id'] + '.wav'
-    wet_full, wet_sr = load_wav(wet_path)
-    if trim_noise:
-        noise_profile = sc.estimate_noise_profile(wet_full[:n_trim], wet_sr) # pre-silence
-        wet_full = sc.spectral_subtract(wet_full, noise_profile, sr)
-    assert wet_sr == sr, f"{wet_path} has a different sample rate than {dry_filename}"
-    wet_trim = wet_full[n_trim:]
-
-    # Process samples, get chunk num
-    delay_samples, sr = measure_delay(wet_trim, dry_trim, sr, verbose=False)
-    dry_aligned, wet_aligned = apply_shift(dry_full, wet_full, delay_samples)
-    n = len(dry_aligned)
-    n_chunks = n // chunk_len # number of full chunks in data
-    accum_chunks = int(0.03*20 / chunk_seconds) # ~1s at chunk_seconds=0.03
-    print(f"Sequential single-file run: {n_chunks} full chunks of {chunk_seconds*1000:.0f}ms each")
-
-    # Feature info
-    n_param_val_dict = normalize_params(record['params'], param_configs)
-    param_tensors = [
-        torch.tensor([n_param_val_dict[pn]], dtype=param_configs[pn]['dtype'], device=device)
-        for pn in param_names
-    ]
-    input_size = len(param_names) + 1
-
-    # Model info
-    model = ConditionedLSTM(input_size=input_size, hidden_size=40).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    # lR adjustment settings
-    lr_patience = 6
-    lr_factor = 0.5
-
-    GAIN = 1.0
-    print("      |                 LOSS                   |           PREDICTIONS         |         TARGET             ")
-    print("EPOCH |    total     esr        dc     pos neg |     mean      std      skew   |    mean       std      skew")
-    #     "03/40 |  +27.159   +25.270 / +25.270 / +25.270 |  +0.00018 / +0.00085 / +0.05  |  +0.00000 / +0.00113 / -1.20"
-    for epoch in range(epochs):
-        model.train() # puts model into training mode / keep inside the loop incase eval .eval() is used later in loop
-        states = None  # hidden state and cell state (h_n, c_n)
-        epoch_loss = 0.0
-        pred_sum = pred_sq_sum = pred_cube_sum = target_sum = target_sq_sum = target_cube_sum = n_vals = 0.0
-        accum_preds, accum_targets = [], []
 
         for i in range(n_chunks):
             s = i * chunk_len
 
-            # Get chunk features / target
-            dry_chunk = torch.from_numpy(dry_aligned[s:s + chunk_len].copy()).unsqueeze(0).to(device)
-            wet_chunk = torch.from_numpy(wet_aligned[s:s + chunk_len].copy()).unsqueeze(0).to(device)
-            x = make_conditioned_input(dry_chunk*GAIN, param_tensors)
-            target = wet_chunk.unsqueeze(-1)
+            chunk = Chunk(dry_aligned[s:s + chunk_len].copy(), wet_aligned[s:s + chunk_len].copy(), params)
 
-            # Predict (drop warmup samples if first chunk otherwise get all samples)
-            # h_n & c_n shape = (num_layers, batch, hidden_size) -> (1, 1, 20)
-            # First chunk gets tensors for each hidden node and the prediction (to calculate loss)
-            # (output, (h_n, c_n)) = model(x, None)
-            pred, states = model(x, states)
-            pred = pred / GAIN
-            pred_for_loss = pred[:, warmup_samples:, :] if i == 0 else pred
-            target_for_loss = target[:, warmup_samples:, :] if i == 0 else target
-
-            # torch.no_grad() is a context manager — everything inside the with block runs without PyTorch building a computation graph 
-            # for it, regardless of whether the tensors involved have requires_grad=True
-            # accumulating running totals so you can print pred_mean/pred_std/target_mean/target_std at the end of the epoch
-            with torch.no_grad():
-                pred_sum += pred_for_loss.sum().item()
-                pred_sq_sum += pred_for_loss.pow(2).sum().item()
-                pred_cube_sum += pred_for_loss.pow(3).sum().item()
-                target_sum += target_for_loss.sum().item()
-                target_sq_sum += target_for_loss.pow(2).sum().item()
-                target_cube_sum += target_for_loss.pow(3).sum().item()
-                n_vals += pred_for_loss.numel()
-
-            # LOSS FUNCTION SEES ~1s OF STEPS
-            accum_preds.append(pred_for_loss)
-            accum_targets.append(target_for_loss)
-
-            # Only apply gradients after accumulating multiple chunks in order to avoid less certain gradients at low volumes
-            # apply new gradients to weights if reached accum_chunks or last chunk
-            remaining_after_this = n_chunks - (i + 1) # dont submit if there is not a full chunk after this
-            if (len(accum_preds) == accum_chunks and remaining_after_this >= accum_chunks) or i == n_chunks - 1:
-                states = tuple(s.detach() for s in states)  # keep only the previous gradient step in memory
-
-                loss, _, _, _ = combined_loss(torch.cat(accum_preds, dim=1), torch.cat(accum_targets, dim=1), dc_weight=0.5, pos_neg_weight=0.2)
-                optimizer.zero_grad() # clear old gradients
-                loss.backward() # compute fresh gradients for this accumulated window only
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
-                optimizer.step() # apply them to the weights
-                accum_preds, accum_targets = [], []
+            chunk_bucket.append(chunk)
+            if (i+1) % segment_length == 0:
+                segments.append(Segment(chunk_bucket, noise_profile))
+                chunk_bucket = []
         
-        # Predict validation def validate(n_chunks, chunk_len, device, param_tensors, combined_loss)
-        model.eval()
-        with torch.no_grad():
-            eval_states = None
-            eval_preds = []
-            for i in range(n_chunks):
-                s = i * chunk_len
-                dry_chunk = torch.from_numpy(dry_aligned[s:s + chunk_len].copy()).unsqueeze(0).to(device)
-                x = make_conditioned_input(dry_chunk, param_tensors)
-                pred, eval_states = model(x, eval_states)
-                eval_preds.append(pred)
-            eval_pred = torch.cat(eval_preds, dim=1)
-            eval_target = torch.from_numpy(wet_aligned[:eval_pred.shape[1]].copy()).unsqueeze(0).unsqueeze(-1).to(device)
-            eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred, eval_target, dc_weight=0.5, pos_neg_weight=0.2)
-            eval_loss, eval_esr, eval_dc, eval_pn = eval_loss.item(), eval_esr.item(), eval_dc.item(), eval_pn.item()
-            pSkewness, pPn_rms, pP999Overp001 = get_symmetry(eval_pred.detach().cpu().numpy())
-            tSkewness, tPn_rms, tP999Overp001 = get_symmetry(eval_target.detach().cpu().numpy())
-            pMean = eval_pred.mean().item()
-            pStd = eval_pred.std().item()
-            tMean = eval_target.mean().item()
-            tStd = eval_target.std().item()
-            print(f"{(epoch+1):02d}/{epochs:02d} |  {eval_loss:+07.3f}   {eval_esr:+07.3f} / {eval_dc:+07.3f} / {eval_pn:+07.3f} |  {pMean:+0.5f} / {pStd:+0.5f} / {pSkewness:+04.2f}  |  {tMean:+0.5f} / {tStd:+0.5f} / {tSkewness:+04.2f}")
-        model.train() # return to train mode
+        self.track = Track(segments)
+    
+    def make_window_batches(self): # group for each trackset
+        track_group=[self.track]
 
-        # Reset model if diverging and lower learning rate
-        if eval_loss < best_loss:
-            bad_epochs_count = 0
-            best_loss = eval_loss
-            best_state = copy.deepcopy(model.state_dict())
-        else:
-            bad_epochs_count += 1
-            if bad_epochs_count > lr_patience:
-                # Restore best model weights
-                model.load_state_dict(best_state)
-                # change optimizer lr
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] *= lr_factor
-                bad_epochs_count = 0
-                print(f"Plateaued: Restored best weights (L = {best_loss:+9.3f}) with LR {optimizer.param_groups[0]['lr']:.2e}")
-
-    # Get best model and save
-    model.load_state_dict(best_state)
-    torch.save(best_state, f'{model_v_output_dir}/model_best.pt')
-    return model
+        batches=[]
+        for s_i in range(0, self.n_segments):
+            batches.append(Batch([track[s_i]], tag='window'))
+        return batches
 
 
-def file_to_segments(dry_file, wet_file, params, param_names, param_configs, trim_noise=True, silent_lead_in_seconds=8, chunk_seconds=0.03):
-    # Get dry data
-    dry_full, sr = load_wav(dry_file)
-    n_trim = int(silent_lead_in_seconds * sr)
-    dry_trim = dry_full[n_trim:]
-    chunk_len = int(chunk_seconds * sr)
+##########################################################################################################################################
+##########################################################################################################################################
 
-    # Get (opt: noiseless) wet data
-    wet_full, wet_sr = load_wav(wet_file)
-    if trim_noise:
-        noise_profile = sc.estimate_noise_profile(wet_full[:n_trim], wet_sr) # pre-silence
-        wet_full = sc.spectral_subtract(wet_full, noise_profile, sr)
-    assert wet_sr == sr, f"{wet_path} has a different sample rate than {dry_filename}"
-    wet_trim = wet_full[n_trim:]
+class ConditionedLSTM(nn.Module):
+    def __init__(self, input_size=4, hidden_size=20, num_layers=1):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
+        self.dense = nn.Linear(hidden_size, 1)
 
-    # Feature info
-    n_param_val_dict = normalize_params(params, param_configs)
-    device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
-    param_tensors = [
-        torch.tensor([n_param_val_dict[pn]], dtype=param_configs[pn]['dtype'], device=device)
-        for pn in param_names
+    def forward(self, x, states=None):
+        out, states = self.lstm(x, states)
+        out = self.dense(out)
+        return out, states
+
+def esr_loss(pred, target, eps=1e-8, min_energy=1e-4):
+    energy = torch.sum(target ** 2)
+    return torch.sum((pred - target) ** 2) / (torch.maximum(energy, torch.tensor(min_energy)) + eps)
+
+
+def dc_loss(pred, target, eps=1e-8):
+    """Penalizes any DC offset difference (mean-level mismatch) between
+    prediction and target -- ESR alone doesn't strongly constrain this."""
+    target_var = torch.var(target) + eps
+    return (torch.mean(pred) - torch.mean(target)) ** 2 / target_var
+
+def pos_neg_balance_loss(pred, target, eps=1e-8):
+    target_var = torch.var(target) + eps
+    pred_pos_rms = torch.sqrt((pred.clamp(min=0) ** 2).mean() + eps)
+    pred_neg_rms = torch.sqrt((pred.clamp(max=0) ** 2).mean() + eps)
+    target_pos_rms = torch.sqrt((target.clamp(min=0) ** 2).mean() + eps)
+    target_neg_rms = torch.sqrt((target.clamp(max=0) ** 2).mean() + eps)
+    return ((pred_pos_rms - target_pos_rms) ** 2 + (pred_neg_rms - target_neg_rms) ** 2) / target_var
+
+def combined_loss(pred, target, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=0.0):
+    esr = esr_loss(pred, target)
+    dc = dc_loss(pred, target)
+    pos_neg_balance = pos_neg_balance_loss(pred, target)
+
+    return [
+        esr + dc_weight * dc + pos_neg_weight * pos_neg_balance,
+        esr,
+        dc,
+        pos_neg_balance
     ]
 
-    delay_samples, sr = measure_delay(wet_trim, dry_trim, sr, verbose=False)
-    dry_aligned, wet_aligned = apply_shift(dry_full, wet_full, delay_samples)
-    n = len(dry_aligned)
-    n_chunks = n // chunk_len # number of full chunks in data
-    # 22 chunks × 2880 samples/chunk = 63,360 samples, and 23 chunks would be 66,240. 
-    # That straddles 65,536 (2^16), which is a well-documented constraint of cuDNN's "persistent" RNN algorithm: 
-    # it requires sequence_length × batch_size to stay under roughly that 2^16 ceiling 
-    # (a legacy limitation from how the persistent kernels index their per-timestep workspace). 
-    # With batch_size=1 here, that reduces to just sequence_length ≲ 65536
-    chunks_per_segment = int(0.03 * 20 / chunk_seconds) # ~1s at chunk_seconds=0.03
-    n_segments = n_chunks // chunks_per_segment
 
-    # Make chunks to train on
-    chunks = []
-    for i in range(n_chunks):
-        s = i * chunk_len
+##########################################################################################################################################
+##########################################################################################################################################
+from scipy.spatial import cKDTree
+# This model currently ingests unscaled parameters. Given all knobs have the same range, 
+# this doesnt't bias toward any knob. Worth addressing for other models. 
 
-        # Get chunk features / target
-        dry_chunk = torch.from_numpy(dry_aligned[s:s + chunk_len].copy()).unsqueeze(0).to(device)
-        wet_chunk = torch.from_numpy(wet_aligned[s:s + chunk_len].copy()).unsqueeze(0).to(device)
-        x = make_conditioned_input(dry_chunk, param_tensors)
-        target = wet_chunk.unsqueeze(-1)
-        chunks.append({
-            'dry_chunk':dry_chunk,
-            'wet_chunk':wet_chunk,
-            'input':x,
-            'target':target
-        })
-
-    segments = []
-    for s in range(n_segments):
-        s = s * chunks_per_segment
-        segments.append(chunks[s:s + chunks_per_segment])
+class TrackDataModel(object):
+    def __init__(self, k=8, bandwidth=0.3):
+        self.tree=None
+        self.noise_profiles=None # (# tracks, # n_freq_bins)
+        self.gain_vals=None # (# tracks, 1)
+        self.param_vals=None
+        self.bandwidth=bandwidth
+        self.k=k
+        super().__init__()
     
-    return segments
+    def train(self, train_dataset:DataSet):
+        self.param_vals = [] # (# tracks, # params)
+        self.noise_profiles = []
+        self.gain_vals = []
+        for track in train_dataset:
+            segment_0 = track[0]
+            chunk_0 = segment_0[0]
+            norm_params = chunk_0.normalize_params(train_dataset.param_configs)
+            pv = [norm_params[pn] for pn in norm_params]
+            self.param_vals.append(pv)
+            self.noise_profiles.append(segment_0.noise_profile.flatten())
+            self.gain_vals.append(track.compute_wet_gain())
+
+        self.param_vals = np.array(self.param_vals)
+        self.noise_profiles = np.array(self.noise_profiles)
+        self.gain_vals = np.array(self.gain_vals)
+        self.tree = cKDTree(self.param_vals)
+
+    def validate(self, validation_dataset:DataSet):
+        for i, track in enumerate(validation_dataset):
+            segment_0 = track[0]
+            chunk_0 = segment_0[0]
+            norm_params = chunk_0.normalize_params(validation_dataset.param_configs)
+            query_params = [norm_params[pn] for pn in norm_params]
+            predicted_noise_profile, predicted_gain = self.predict(query_params)
+            actual_noise_profile = segment_0.noise_profile
+            actual_gain = track.compute_wet_gain()
+
+            print(f'Track {i}')
+            print(f'noise_profile {predicted_noise_profile} vs. {actual_noise_profile}')
+            print(f'gain {predicted_gain} vs. {actual_gain}')
+
+
+    def predict(self, query_params):
+        distances, indices = self.tree.query(query_params, k=self.k)
+        weights = np.exp(-(distances**2) / (2 * self.bandwidth**2))
+        weights /= weights.sum()
+
+        neighbor_noise_profiles = self.noise_profiles[indices]  # (k, n_freq_bins)
+        predicted_noise_profile = (weights[:, None] * neighbor_noise_profiles).sum(axis=0)
+
+        neighbor_gains = self.gain_vals[indices]               # (k,)
+        predicted_gain = (weights * neighbor_gains).sum()
+
+        return predicted_noise_profile, predicted_gain
+    
+    def save(self, model_output_dir):
+        model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
+        os.makedirs(model_v_output_dir, exist_ok=True)
+        np.savez(
+            f'{model_v_output_dir}/track_model.npz',
+            param_vals=self.param_vals,
+            noise_profiles=self.noise_profiles,
+            gain_vals=self.gain_vals
+        )
+
+    def load(self, model_path):
+        data = np.load(model_path)
+        self.param_vals = data['param_vals']
+        self.noise_profiles = data['noise_profiles']
+        self.gain_vals = data['gain_vals']
+        self.tree = cKDTree(self.param_vals)  # cheap to rebuild from scratch every time
+
+##########################################################################################################################################
+##########################################################################################################################################
+
+from scipy.spatial import cKDTree
+class TrackDataModel2(object):
+    def __init__(self, k=8, bandwidth=0.5):
+        self.tree=None
+        self.noise_profiles=None # (# tracks, # n_freq_bins)
+        self.gain_vals=None # (# tracks, 1)
+        self.param_vals=None
+        self.bandwidth=bandwidth
+        self.k=k
+        super().__init__()
+    
+    def train(self, train_dataset:DataSet):
+        self.param_vals = [] # (# tracks, # params)
+        self.noise_profiles = []
+        self.gain_vals = []
+        for track in train_dataset:
+            segment_0 = track[0]
+            chunk_0 = segment_0[0]
+            norm_params = chunk_0.normalize_params(train_dataset.param_configs)
+            pv = [norm_params[pn] for pn in norm_params]
+            self.param_vals.append(pv)
+            self.noise_profiles.append(segment_0.noise_profile.flatten())
+            self.gain_vals.append(track.compute_wet_gain())
+
+        self.param_vals = np.array(self.param_vals)
+        self.noise_profiles = np.array(self.noise_profiles)
+        self.gain_vals = np.array(self.gain_vals)
+        self.tree = cKDTree(self.param_vals)
+
+    def validate(self, validation_dataset:DataSet):
+        for i, track in enumerate(validation_dataset):
+            segment_0 = track[0]
+            chunk_0 = segment_0[0]
+            norm_params = chunk_0.normalize_params(validation_dataset.param_configs)
+            query_params = [norm_params[pn] for pn in norm_params]
+            predicted_noise_profile, predicted_gain = self.predict(query_params)
+            actual_noise_profile = segment_0.noise_profile
+            actual_gain = track.compute_wet_gain()
+
+            print(f'Track {i}')
+            print(f'noise_profile {predicted_noise_profile} vs. {actual_noise_profile}')
+            print(f'gain {predicted_gain} vs. {actual_gain}')
+
+
+    def predict(self, query_params):
+        distances, indices = self.tree.query(query_params, k=self.k)
+        weights = np.exp(-(distances**2) / (2 * self.bandwidth**2))
+        # weights /= weights.sum()
+
+        X = np.hstack([np.ones((self.k, 1)), self.param_vals[indices]]) # (k, 4) -- [bias, d, f, v]
+        sw = np.sqrt(weights)
+        Xw = X * sw[:, None]
+        query_row = np.concatenate([[1.0], query_params])
+
+        # Gain (scalar target)
+        # yw_gain = self.gain_vals[indices] * sw
+        yw_gain = np.log(self.gain_vals[indices]) * sw
+        gain_coeffs, *_ = np.linalg.lstsq(Xw, yw_gain, rcond=None)          # weighted least squares
+        predicted_gain = query_row @ gain_coeffs
+
+        # Noise profile (vector target -- fit every bin in one call)
+        # yw_noise_profile = self.noise_profiles[indices] * sw[:, None]           # (k, n_freq_bins)
+        yw_noise_profile = np.log(self.noise_profiles[indices]) * sw[:, None]           # (k, n_freq_bins)
+        profile_coeffs, *_ = np.linalg.lstsq(Xw, yw_noise_profile, rcond=None)  # (4, n_freq_bins)
+        predicted_noise_profile = query_row @ profile_coeffs               # (n_freq_bins,)
+
+        print(f"predicted_gain: {predicted_gain}")
+        print(f"predicted_noise_profile: {predicted_noise_profile}")
+
+        return predicted_noise_profile, predicted_gain
+
+    
+    def save(self, model_output_dir):
+        model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
+        os.makedirs(model_v_output_dir, exist_ok=True)
+        np.savez(
+            f'{model_v_output_dir}/track_model.npz',
+            param_vals=self.param_vals,
+            noise_profiles=self.noise_profiles,
+            gain_vals=self.gain_vals
+        )
+
+    def load(self, model_path):
+        data = np.load(model_path)
+        self.param_vals = data['param_vals']
+        self.noise_profiles = data['noise_profiles']
+        self.gain_vals = data['gain_vals']
+        self.tree = cKDTree(self.param_vals)  # cheap to rebuild from scratch every time
+
+##########################################################################################################################################
+##########################################################################################################################################
+
 
 def train_manifest(
     wet_dir,
@@ -461,44 +582,24 @@ def train_manifest(
     lr_patience = 6,
     lr_factor = 0.5,
     batch_size=30,
+    hidden_size=20,
     verbose_time=False,
     verbose_performance = False
 ):
     start = datetime.datetime.now()
-    print(f"device {device}")
     model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
     os.makedirs(model_v_output_dir, exist_ok=True)
-
-    # Get segments from train files
-    train_segments=[] # 1d
-    with open(train_manifest, 'r') as f:
-        records = [json.loads(line) for line in f if line.strip()]
-    for record in records:
-        wet_file = wet_dir + '/' + record['id'] + '.wav'
-        params=record['params']
-        file_segments = file_to_segments(dry_file, wet_file, params, param_names, param_configs, trim_noise=trim_noise)
-        train_segments+=file_segments
     
-    # Get ordered segments from validation files
-    validation_segmented_tracks = [] # 2d
-    with open(validation_manifest, 'r') as f:
-        records = [json.loads(line) for line in f if line.strip()]
-    for record in records:
-        wet_file = wet_dir + '/' + record['id'] + '.wav'
-        params=record['params']
-        file_segments = file_to_segments(dry_file, wet_file, params, param_names, param_configs, trim_noise=trim_noise)
-        validation_segmented_tracks.append(file_segments)
-    shortest_track_samples = min([len(trk) for trk in validation_segmented_tracks])
-    validation_segmented_tracks = [trk[:shortest_track_samples] for trk in validation_segmented_tracks]
-
-    # Shuffle and batch segments
-    random.seed(42)
-    random.shuffle(train_segments)  # shuffles in place
-    batches = [train_segments[i:i+batch_size] for i in range(0, len(train_segments), batch_size)]
+    # Load data
+    print(f"Load")
+    train_dataset = DataSet(train_manifest, dry_file, wet_dir, chunk_seconds, param_names, param_configs, silent_lead_in_seconds=silent_lead_in_seconds, trim_noise = trim_noise)
+    print(f"Loaded 1")
+    validation_dataset = DataSet(validation_manifest, dry_file, wet_dir, chunk_seconds, param_names, param_configs, silent_lead_in_seconds=silent_lead_in_seconds, trim_noise = trim_noise)
+    print(f"Loaded 2")
 
     # Model info
-    model = ConditionedLSTM(input_size=len(param_names) + 1, hidden_size=40).to(device)
-    model.lstm.flatten_parameters()
+    model = ConditionedLSTM(input_size=len(param_names) + 1, hidden_size=hidden_size).to(device)
+    # model.lstm.flatten_parameters()                                 < =======================================
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     prepped = datetime.datetime.now()
@@ -515,53 +616,53 @@ def train_manifest(
         e_time = datetime.datetime.now()
 
         # Training
-        model.train() # puts model into training mode / keep inside the loop incase eval .eval() is used later in loop
-        prof_ctx = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) if verbose_performance else nullcontext()
-        with prof_ctx as prof:
+        model.train()
+        for batch in train_dataset.batches_of_random(): # batched segments of no specified track or ts
+            # get 
+            features_tensors, target_tensors = batch.get_tensors(device, param_names, param_configs)
 
-            for batch in batches:  
-                # Predict
-                x_batch = torch.cat([torch.cat([c['input'] for c in seg], dim=1) for seg in batch], dim=0)
-                target_batch = torch.cat([torch.cat([c['target'] for c in seg], dim=1) for seg in batch], dim=0)
-                pred, _ = model(x_batch, None)
-                pred_for_loss = pred[:, warmup_samples:, :]
-                target_for_loss = target_batch[:, warmup_samples:, :]
-                loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, dc_weight=0.5, pos_neg_weight=0.2)
-                # Backprop
-                optimizer.zero_grad() # clear old gradients
-                loss.backward() # compute fresh gradients for this accumulated window only
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
-                optimizer.step() # apply them to the weights
-
-        if verbose_performance: print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-        if verbose_performance: print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+            pred, _ = model(features_tensors, None)
+            pred_for_loss = pred[:, warmup_samples:, :]
+            target_for_loss = target_tensors[:, warmup_samples:, :]
+            loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, dc_weight=0.5, pos_neg_weight=0.2, segment_size=train_dataset.segment_size)
+            # Backprop
+            optimizer.zero_grad() # clear old gradients
+            loss.backward() # compute fresh gradients for this accumulated window only
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
+            optimizer.step() # apply them to the weights
 
         t_time =  datetime.datetime.now()
         if verbose_time: print(f"Train time: {t_time - e_time}")
 
-        # Validation
         model.eval()
+        num_tracks = len(validation_dataset.tracks)
         with torch.no_grad():
+        # Predictions
             eval_states = None
-            num_tracks = len(validation_segmented_tracks)
             eval_preds = [[] for _ in range(num_tracks)]
             eval_targets = [[] for _ in range(num_tracks)]
 
-            tracks_by_segment = [list(row) for row in zip(*validation_segmented_tracks)]
+            # Per Track group
+            batch_groups = validation_dataset.make_window_batches(track_size=30)
+            for batches in batch_groups:
+                for batch in batches:
+                    input_batch, target_batch = batch.get_tensors(device,param_names,param_configs)
+                    pred_batch, eval_states = model(input_batch, eval_states)
+                    # Save pred, tgt in memory structure
+                    for i, track in enumerate(batch):
+                        eval_preds[i].append(pred_batch[i:i+1])
+                        eval_targets[i].append(target_batch[i:i+1])
 
-            for segments in tracks_by_segment:
-                x_block = torch.cat([torch.cat([chunk['input'] for chunk in segment], dim=1) for segment in segments], dim=0)
-                target_block = torch.cat([torch.cat([chunk['target'] for chunk in segment], dim=1) for segment in segments], dim=0)
-                pred, states = model(x_block, eval_states)
-                for p in range(num_tracks):
-                    eval_preds[p].append(pred[p:p+1])
-                    eval_targets[p].append(target_block[p:p+1])
+            p_time =  datetime.datetime.now()
+            if verbose_time: print(f"Prediction time: {p_time - t_time}")
 
+
+        # Validation
             eval_losss = eval_esrs = eval_dcs = eval_pns = pSkewnesss = pPn_rmss = pP999Overp001s = tSkewnesss = tPn_rmss = tP999Overp001s = pMeans = pStds = tMeans = tStds = 0.0
             for p in range(num_tracks):
                 eval_pred_p = torch.cat(eval_preds[p], dim=1)
                 eval_target_p = torch.cat(eval_targets[p], dim=1)
-                eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred_p, eval_target_p, dc_weight=0.5, pos_neg_weight=0.2)
+                eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred_p, eval_target_p, dc_weight=0.5, pos_neg_weight=0.2, segment_size=validation_dataset.segment_size)
                 eval_losss += eval_loss.item()
                 eval_esrs += eval_esr.item()
                 eval_dcs += eval_dc.item()
@@ -589,10 +690,10 @@ def train_manifest(
             tStd = tStds/num_tracks
             tSkewness = tSkewnesss/num_tracks
             print(f"{(epoch+1):02d}/{epochs:02d} |  {eval_loss:+07.3f}   {eval_esr:+07.3f} / {eval_dc:+07.3f} / {eval_pn:+07.3f} |  {pMean:+0.5f} / {pStd:+0.5f} / {pSkewness:+04.2f}  |  {tMean:+0.5f} / {tStd:+0.5f} / {tSkewness:+04.2f}")
-        model.train() # return to train mode
 
         v_time =  datetime.datetime.now()
-        if verbose_time: print(f"Validation time: {v_time - t_time}")
+        if verbose_time: print(f"Validation time: {v_time - p_time}")
+
 
         # Reset model if diverging and lower learning rate
         if eval_loss < best_loss:
@@ -610,289 +711,74 @@ def train_manifest(
                 bad_epochs_count = 0
                 print(f"Plateaued: Restored best weights (L = {best_loss:+9.3f}) with LR {optimizer.param_groups[0]['lr']:.2e}")
 
+
     # Get best model and save
     model.load_state_dict(best_state)
     torch.save(best_state, f'{model_v_output_dir}/model_best.pt')
     return model
-    
+
+def predict_track(checkpoint, track):
+    # Model info
+    device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+    model = ConditionedLSTM(input_size=len(param_names) + 1, hidden_size=hidden_size).to(device)
+    model.load_state_dict(torch.load(checkpoint, map_location=device))
+    model.eval()
 
 
-
-
-
-def train_shuffled_segmented_single_file(
-    wet_dir,
-    learning_rate=5e-4,
-    epochs=10,
-    warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
-    silent_lead_in_seconds=8,
-    chunk_seconds=0.03,
+def predict_manifest(
+    checkpoint='',
+    prediction_manifest='/home/ubuntu/dsp-modeler/data/prediction/manifest.jsonl',
+    predict_dir='/home/ubuntu/dsp-modeler/data/outputs',
     param_names=["d", "f", "v"],
     param_configs={
         'd':{'min':1, 'max':7, 'dtype':torch.float32},
         'f':{'min':1, 'max':7, 'dtype':torch.float32},
         'v':{'min':1, 'max':7, 'dtype':torch.float32},
     },
-    train_manifest='/home/ubuntu/dsp-modeler/data/train/manifest.jsonl',
-    dry_filename='/home/ubuntu/dsp-modeler/data/input/input.wav',
+    silent_lead_in_seconds=8,
+    chunk_seconds=0.03,
     device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-    model_output_dir='',
     trim_noise=True,
-    lr_patience = 6,
-    lr_factor = 0.5,
-    batch_size=30,
-    verbose_time=False,
-    verbose_performance = False
+    track_size=30,
+    hidden_size=20
 ):
-    start = datetime.datetime.now()
-    print(f"device {device}")
-    model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
-    os.makedirs(model_v_output_dir, exist_ok=True)
-    best_loss = float('inf')
-    best_state = None
-    bad_epochs_count = 0
-
-    # Get dry data
-    dry_full, sr = load_wav(dry_filename)
-    n_trim = int(silent_lead_in_seconds * sr)
-    dry_trim = dry_full[n_trim:]
-    chunk_len = int(chunk_seconds * sr)
-
-    # Get (opt: noiseless) wet data
-    with open(train_manifest, 'r') as f:
-        record = json.loads(f.readline())
-    wet_path = wet_dir + '/' + record['id'] + '.wav'
-    wet_full, wet_sr = load_wav(wet_path)
-    if trim_noise:
-        noise_profile = sc.estimate_noise_profile(wet_full[:n_trim], wet_sr) # pre-silence
-        wet_full = sc.spectral_subtract(wet_full, noise_profile, sr)
-    assert wet_sr == sr, f"{wet_path} has a different sample rate than {dry_filename}"
-    wet_trim = wet_full[n_trim:]
-
-    # Feature info
-    n_param_val_dict = normalize_params(record['params'], param_configs)
-    param_tensors = [
-        torch.tensor([n_param_val_dict[pn]], dtype=param_configs[pn]['dtype'], device=device)
-        for pn in param_names
-    ]
-
-    # Process samples, get chunk num
-    delay_samples, sr = measure_delay(wet_trim, dry_trim, sr, verbose=False)
-    dry_aligned, wet_aligned = apply_shift(dry_full, wet_full, delay_samples)
-    n = len(dry_aligned)
-    n_chunks = n // chunk_len # number of full chunks in data
-    # 22 chunks × 2880 samples/chunk = 63,360 samples, and 23 chunks would be 66,240. 
-    # That straddles 65,536 (2^16), which is a well-documented constraint of cuDNN's "persistent" RNN algorithm: 
-    # it requires sequence_length × batch_size to stay under roughly that 2^16 ceiling 
-    # (a legacy limitation from how the persistent kernels index their per-timestep workspace). 
-    # With batch_size=1 here, that reduces to just sequence_length ≲ 65536
-    chunks_per_segment = int(0.03*20 / chunk_seconds) # ~1s at chunk_seconds=0.03
-    n_segments = n_chunks // chunks_per_segment
-    
-    
-    # Make chunks to train on
-    chunks = []
-    for i in range(n_chunks):
-        s = i * chunk_len
-
-        # Get chunk features / target
-        dry_chunk = torch.from_numpy(dry_aligned[s:s + chunk_len].copy()).unsqueeze(0).to(device)
-        wet_chunk = torch.from_numpy(wet_aligned[s:s + chunk_len].copy()).unsqueeze(0).to(device)
-        x = make_conditioned_input(dry_chunk, param_tensors)
-        target = wet_chunk.unsqueeze(-1)
-        chunks.append({
-            'dry_chunk':dry_chunk,
-            'wet_chunk':wet_chunk,
-            'input':x,
-            'target':target
-        })
-
-    segments = []
-    for s in range(n_segments):
-        s = s * chunks_per_segment
-        segments.append(chunks[s:s + chunks_per_segment])
-    
-    batches = [segments[i:i+batch_size] for i in range(0, len(segments), batch_size)]
-
-    # Randomly shuffle segments
-    random.seed(42)
-    random.shuffle(segments)  # shuffles in place
-    print(f"Sequential single-file run: {len(chunks)} chunks of {chunk_seconds*1000:.0f}ms each")
-    print(f"Sequential single-file run: {len(segments)} segments of {chunks_per_segment} chunks each")
-    print(f"Sequential single-file run: {len(batches)} batches of {batch_size} batch_size")
-
-
-    # Model info
-    model = ConditionedLSTM(input_size=len(param_names) + 1, hidden_size=40).to(device)
-    model.lstm.flatten_parameters()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    prepped = datetime.datetime.now()
-    if verbose_time: print(f"Prep took {prepped - start}")
-
-    GAIN = 1.0
-    print("      |                 LOSS                   |           PREDICTIONS         |         TARGET             ")
-    print("EPOCH |    total     esr        dc     pos neg |     mean      std      skew   |    mean       std      skew")
-    #     "03/40 |  +27.159   +25.270 / +25.270 / +25.270 |  +0.00018 / +0.00085 / +0.05  |  +0.00000 / +0.00113 / -1.20" 
-    multichunk_predict = False
-    multibatch_predict = True
-    for epoch in range(epochs):
-        model.train() # puts model into training mode / keep inside the loop incase eval .eval() is used later in loop
-        e_time = datetime.datetime.now()
-
-        prof_ctx = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) if verbose_performance else nullcontext()
-
-        with prof_ctx as prof:
-
-            if multibatch_predict:
-                for batch in batches:  
-                    x_batch = torch.cat([torch.cat([c['input'] for c in seg], dim=1) for seg in batch], dim=0)
-                    target_batch = torch.cat([torch.cat([c['target'] for c in seg], dim=1) for seg in batch], dim=0)
-                    pred, _ = model(x_batch, None)
-                    pred_for_loss = pred[:, warmup_samples:, :]
-                    target_for_loss = target_batch[:, warmup_samples:, :]
-                    loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, dc_weight=0.5, pos_neg_weight=0.2)
-            
-                    optimizer.zero_grad() # clear old gradients
-                    loss.backward() # compute fresh gradients for this accumulated window only
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
-                    optimizer.step() # apply them to the weights
-            
-            else:
-                for segment in segments:    
-                    s_preds, s_targets = [], []
-
-                    if multichunk_predict:
-                        x_full = torch.cat([chunk['input'] for chunk in segment], dim=1).contiguous()
-                        target_full = torch.cat([chunk['target'] for chunk in segment], dim=1).contiguous()
-                        pred, _ = model(x_full, None)
-                        pred_for_loss = pred[:, warmup_samples:, :]
-                        target_for_loss = target_full[:, warmup_samples:, :]
-                        loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, dc_weight=0.5, pos_neg_weight=0.2)
-                    else:
-                        states = None  # hidden state and cell state (h_n, c_n)
-                        first_chunk = True
-                        for chunk in segment:
-                            x = chunk['input']
-                            target = chunk['target']
-                            pred, states = model(x, states)
-                            pred_for_loss = pred[:, warmup_samples:, :] if first_chunk else pred
-                            target_for_loss = target[:, warmup_samples:, :] if first_chunk else target
-                            first_chunk = False
-                            s_preds.append(pred_for_loss)
-                            s_targets.append(target_for_loss)
-                        loss, _, _, _ = combined_loss(torch.cat(s_preds, dim=1), torch.cat(s_targets, dim=1), dc_weight=0.5, pos_neg_weight=0.2)
-
-                    optimizer.zero_grad() # clear old gradients
-                    loss.backward() # compute fresh gradients for this accumulated window only
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
-                    optimizer.step() # apply them to the weights
-
-        if verbose_performance: print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-
-        t_time =  datetime.datetime.now()
-        if verbose_time: print(f"Train time: {t_time - e_time}")
-
-        # Predict validation def validate(n_chunks, chunk_len, device, param_tensors, combined_loss)
-        model.eval()
-        with torch.no_grad():
-            eval_states = None
-            eval_preds = []
-            for i in range(n_chunks):
-                s = i * chunk_len
-                dry_chunk = torch.from_numpy(dry_aligned[s:s + chunk_len].copy()).unsqueeze(0).to(device)
-                x = make_conditioned_input(dry_chunk, param_tensors)
-                pred, eval_states = model(x, eval_states)
-                eval_preds.append(pred)
-            # for block_idx in range(n_blocks):  # same block count for every file
-            #     x_block = torch.stack([file_chunks[f][block_idx] for f in range(len(files))], dim=0)  # (n_files, block_len, input_size)
-            #     pred, states = model(x_block, states)
-            #     for f in range(len(files)):
-            #         all_preds[f].append(pred[f:f+1])
-            eval_pred = torch.cat(eval_preds, dim=1)
-            eval_target = torch.from_numpy(wet_aligned[:eval_pred.shape[1]].copy()).unsqueeze(0).unsqueeze(-1).to(device)
-            eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred, eval_target, dc_weight=0.5, pos_neg_weight=0.2)
-            eval_loss, eval_esr, eval_dc, eval_pn = eval_loss.item(), eval_esr.item(), eval_dc.item(), eval_pn.item()
-            pSkewness, pPn_rms, pP999Overp001 = get_symmetry(eval_pred.detach().cpu().numpy())
-            tSkewness, tPn_rms, tP999Overp001 = get_symmetry(eval_target.detach().cpu().numpy())
-            pMean = eval_pred.mean().item()
-            pStd = eval_pred.std().item()
-            tMean = eval_target.mean().item()
-            tStd = eval_target.std().item()
-            print(f"{(epoch+1):02d}/{epochs:02d} |  {eval_loss:+07.3f}   {eval_esr:+07.3f} / {eval_dc:+07.3f} / {eval_pn:+07.3f} |  {pMean:+0.5f} / {pStd:+0.5f} / {pSkewness:+04.2f}  |  {tMean:+0.5f} / {tStd:+0.5f} / {tSkewness:+04.2f}")
-        model.train() # return to train mode
-
-        v_time =  datetime.datetime.now()
-        if verbose_time: print(f"Validation time: {v_time - t_time}")
-
-        # Reset model if diverging and lower learning rate
-        if eval_loss < best_loss:
-            bad_epochs_count = 0
-            best_loss = eval_loss
-            best_state = copy.deepcopy(model.state_dict())
-        else:
-            bad_epochs_count += 1
-            if bad_epochs_count > lr_patience:
-                # Restore best model weights
-                model.load_state_dict(best_state)
-                # change optimizer lr
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] *= lr_factor
-                bad_epochs_count = 0
-                print(f"Plateaued: Restored best weights (L = {best_loss:+9.3f}) with LR {optimizer.param_groups[0]['lr']:.2e}")
-
-    # Get best model and save
-    model.load_state_dict(best_state)
-    torch.save(best_state, f'{model_v_output_dir}/model_best.pt')
-    return model
-
-
-if __name__ == '__main__':
-
-    # # 1 audio overfit - chunks in ordered accumulated sequences
-    # model = train_stateful_single_file(
-    #     wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
-    #     learning_rate=5e-4,
-    #     epochs=20,
-    #     warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
-    #     silent_lead_in_seconds=8,
-    #     chunk_seconds=0.03,
-    #     param_names=["d", "f", "v"],
-    #     param_configs={
-    #         'd':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'f':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'v':{'min':1, 'max':7, 'dtype':torch.float32},
-    #     },
-    #     train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl',
-    #     dry_filename='/home/ubuntu/dsp-modeler/data/input/input.wav',
-    #     device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-    #     model_output_dir = f'/home/ubuntu/dsp-modeler/black_box/model/models'
-    # )
-
-    # 1 audio overfit - chunks in shuffles sequences
-    train_shuffled_segmented_single_file(
-        wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
-        learning_rate=5e-4*30,
-        epochs=20,
-        warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
-        silent_lead_in_seconds=8,
+    prediction_dataset = PredictionSet(
+        predict_file=None,
+        predict_data=None, params=None, sr=None,
+        predict_manifest_record=None, predict_dir=None,
         chunk_seconds=0.03,
-        param_names=["d", "f", "v"],
-        param_configs={
-            'd':{'min':1, 'max':7, 'dtype':torch.float32},
-            'f':{'min':1, 'max':7, 'dtype':torch.float32},
-            'v':{'min':1, 'max':7, 'dtype':torch.float32},
-        },
-        train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl',
-        dry_filename='/home/ubuntu/dsp-modeler/data/input/input.wav',
-        device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-        model_output_dir = f'/home/ubuntu/dsp-modeler/black_box/model/models',
-        trim_noise=True,
-        lr_patience = 6,
-        lr_factor = 0.5
+        silent_lead_in_seconds=8,
+        trim_noise=True
     )
 
-    # Many audio trains - chunked in shuffled sequences
+    # Model info
+    model = ConditionedLSTM(input_size=len(param_names) + 1, hidden_size=hidden_size).to(device)
+    model.load_state_dict(torch.load(checkpoint, map_location=device))
+    model.eval()
+
+    num_tracks = len(validation_dataset.tracks)
+    with torch.no_grad():
+    # Predictions
+        eval_states = None
+        eval_preds = [[] for _ in range(num_tracks)]
+
+        # Per Track group
+        batches = prediction_dataset.make_window_batches(track_size=track_size)[0]
+        for batch in batches:
+            input_batch, _ = batch.get_tensors(device,param_names,param_configs)
+            pred_batch, eval_states = model(input_batch, eval_states)
+            # Save pred, tgt in memory structure
+            for i, track in enumerate(batch):
+                eval_preds[i].append(pred_batch[i:i+1])
+    
+    eval_pred_p = torch.cat(eval_preds[p], dim=1)
+
+    return eval_pred_p
+
+##########################################################################################################################################
+##########################################################################################################################################
+
+if __name__ == '__main__':
     # train_manifest(
     #     wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
     #     learning_rate=5e-4,
@@ -906,66 +792,27 @@ if __name__ == '__main__':
     #         'f':{'min':1, 'max':7, 'dtype':torch.float32},
     #         'v':{'min':1, 'max':7, 'dtype':torch.float32},
     #     },
-    #     train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl',
-    #     validation_manifest='/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl',
+    #     train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train/manifest.jsonl',
+    #     validation_manifest='/home/ubuntu/dsp-modeler/black_box/data/validation/manifest-15.jsonl',
     #     dry_file='/home/ubuntu/dsp-modeler/data/input/input.wav',
     #     device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
     #     model_output_dir = f'/home/ubuntu/dsp-modeler/black_box/model/models',
     #     trim_noise=True,
     #     lr_patience = 6,
     #     lr_factor = 0.5,
-    #     batch_size=30,
     #     verbose_time=False,
-    #     verbose_performance = False
+    #     verbose_performance = False,
+    #     hidden_size=40
     # )
 
+    track_data_model = TrackDataModel2(k=5, bandwidth=0.5)
 
+    # train_dataset = DataSet('/home/ubuntu/dsp-modeler/black_box/data/train/manifest.jsonl', '/home/ubuntu/dsp-modeler/data/input/input.wav', '/home/ubuntu/dsp-modeler/data/outputs', 0.03, ["d", "f", "v"], {'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, silent_lead_in_seconds=8, trim_noise = True)
+    # validation_dataset = DataSet('/home/ubuntu/dsp-modeler/black_box/data/validation/manifest.jsonl', '/home/ubuntu/dsp-modeler/data/input/input.wav', '/home/ubuntu/dsp-modeler/data/outputs', 0.03, ["d", "f", "v"], {'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, silent_lead_in_seconds=8, trim_noise = True)
 
-    # model = train(
-    #     batch_size=40,
-    #     learning_rate = 5e-3,
-    #     epochs=40,
-    #     warmup_samples=1000,      # let the LSTM "settle" into a chunk before computing loss on it,  so early timesteps with poor hidden state don't dominate the gradient
-    #     silent_lead_in_seconds=8, # matches your capture convention - trim useless noise signal
-    #     chunk_seconds=0.03,       # TBPTT chunk length - audio ML commonly uses ~2048-4096 samples; at 96kHz - that's roughly 20-40ms -- start small / tune based on your GPU memory
-    #     param_names=["d", "f", "v"],
-    #     target="dry",
-    #     param_configs={
-    #         'd':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'f':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'v':{'min':1, 'max':7, 'dtype':torch.float32},
-    #     },
-    #     train_manifest =    '/home/ubuntu/dsp-modeler/black_box/data/train/manifest.jsonl',
-    #     dry_filename =      '/home/ubuntu/dsp-modeler/data/input/input.wav',
-    #     model_output_dir = f'/home/ubuntu/dsp-modeler/black_box/model/models
-    # )
-
-
-
-
-
-    # train_manifest(
-    #     wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
-    #     learning_rate=5e-4,
-    #     epochs=20,
-    #     warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
-    #     silent_lead_in_seconds=8,
-    #     chunk_seconds=0.03,
-    #     param_names=["d", "f", "v"],
-    #     param_configs={
-    #         'd':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'f':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'v':{'min':1, 'max':7, 'dtype':torch.float32},
-    #     },
-    #     train_manifest='/home/ubuntu/dsp-modeler/data/train/manifest.jsonl',
-    #     validation_manifest='/home/ubuntu/dsp-modeler/data/validation/manifest.jsonl',
-    #     dry_file='/home/ubuntu/dsp-modeler/data/input/input.wav',
-    #     device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-    #     model_output_dir='',
-    #     trim_noise=True,
-    #     lr_patience = 6,
-    #     lr_factor = 0.5,
-    #     batch_size=30,
-    #     verbose_performance = False
-    # )
-
+    train_dataset = DataSet('/home/ubuntu/dsp-modeler/black_box/data/validation/manifest.jsonl', '/home/ubuntu/dsp-modeler/data/input/input.wav', '/home/ubuntu/dsp-modeler/data/outputs', 0.03, ["d", "f", "v"], {'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, silent_lead_in_seconds=8, trim_noise = True)
+    validation_dataset = DataSet('/home/ubuntu/dsp-modeler/black_box/data/train/manifest-5.jsonl', '/home/ubuntu/dsp-modeler/data/input/input.wav', '/home/ubuntu/dsp-modeler/data/outputs', 0.03, ["d", "f", "v"], {'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, silent_lead_in_seconds=8, trim_noise = True)
+    
+    track_data_model.train(train_dataset)
+    track_data_model.save(f'/home/ubuntu/dsp-modeler/black_box/model/track_models')
+    track_data_model.validate(validation_dataset)
