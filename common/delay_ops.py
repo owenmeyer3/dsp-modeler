@@ -165,7 +165,7 @@ def measure_delay(
               f"supported by {len(members)}/{len(all_candidates)} candidates "
               f"from {n_onsets_support}/{len(onsets)} onset(s): {support_onsets}")
 
-    print(f"\n{delay_samples:+.0f} samples ({delay_samples / sample_rate * 1000:+.3f} ms)")
+    # print(f"\n{delay_samples:+.0f} samples ({delay_samples / sample_rate * 1000:+.3f} ms)")
     return int(delay_samples), sample_rate
 
 def apply_shift(dry_data, wet_data, delay_samples):
@@ -173,7 +173,6 @@ def apply_shift(dry_data, wet_data, delay_samples):
     samples after dry's content at sample t (delay_samples > 0, the normal case --
     wet lags dry through the reamp/pedal/interface round trip). Returns
     (dry_aligned, wet_aligned) of equal length."""
-    print(delay_samples)
     if delay_samples >= 0:
         wet_al = wet_data[delay_samples:]
         dry_al = dry_data[:len(wet_al)]

@@ -63,14 +63,14 @@ def train_manifest(
         for batch in train_dataset.batches_of_random(): # batched segments of no specified track or ts
             # get 
             apply_gain=True
-            features_tensors, target_tensors, gains = batch.get_tensors(device, param_names, param_configs, apply_gain=apply_gain)
-
+            features_tensors, target_tensors, gains = batch.get_tensors(device, param_names, param_configs, apply_gain=apply_gain) # adds gain param to segments
+            print(f"set {gains.shape}")
             pred, _ = model(features_tensors, None)
             if apply_gain: pred = pred / gains[:, None, None]   # (batch,) -> (batch, 1, 1), broadcasts against pred's (batch, seq_len, 1)
 
             pred_for_loss = pred[:, warmup_samples:, :]
             target_for_loss = target_tensors[:, warmup_samples:, :]
-            loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, dc_weight=0.5, pos_neg_weight=0.2, segment_size=train_dataset.segment_size)
+            loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, batch_size, dc_weight=0.5, pos_neg_weight=0.2, segment_size=train_dataset.segment_size)
 
             # Backprop
             optimizer.zero_grad() # clear old gradients
@@ -90,7 +90,7 @@ def train_manifest(
             eval_targets = [[] for _ in range(num_tracks)]
 
             # Per Track group
-            batch_groups = validation_dataset.make_window_batches(track_size=batch_size)
+            batch_groups = validation_dataset.make_window_batches(batch_size=batch_size)
             for batches in batch_groups:
                 for batch in batches:
                     input_batch, target_batch, gains = batch.get_tensors(device,param_names,param_configs, apply_gain=apply_gain)
@@ -110,7 +110,7 @@ def train_manifest(
             for p in range(num_tracks):
                 eval_pred_p = torch.cat(eval_preds[p], dim=1)
                 eval_target_p = torch.cat(eval_targets[p], dim=1)
-                eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred_p, eval_target_p, dc_weight=0.5, pos_neg_weight=0.2, segment_size=validation_dataset.segment_size)
+                eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred_p, eval_target_p, batch_size, dc_weight=0.5, pos_neg_weight=0.2, segment_size=validation_dataset.segment_size)
                 eval_losss += eval_loss.item()
                 eval_esrs += eval_esr.item()
                 eval_dcs += eval_dc.item()
@@ -199,7 +199,7 @@ if __name__ == '__main__':
     gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/gain_model/2026-08-18_20-17/gain_model.npz')
 
     example_dataset = DataSet(
-        '/home/ubuntu/dsp-modeler/black_box/data/train/manifest-5.jsonl', 
+        '/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl', 
         '/home/ubuntu/dsp-modeler/data/input/input.wav', 
         '/home/ubuntu/dsp-modeler/data/outputs', 
         chunk_seconds, 
@@ -223,7 +223,7 @@ if __name__ == '__main__':
             'v':{'min':1, 'max':7, 'dtype':torch.float32},
         },
         device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-        model_output_dir='',
+        model_output_dir='/home/ubuntu/dsp-modeler/black_box/model/models/transform_model',
         lr_patience = 6,
         lr_factor = 0.5,
         batch_size=30,

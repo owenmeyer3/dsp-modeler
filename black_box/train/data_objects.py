@@ -130,18 +130,10 @@ class Track():
     def get_dry(self):
         chunks_data = [chunk.dry_data for segment in self.segments for chunk in segment]
         return np.concatenate(chunks_data)
-        # data=[]
-        # for segment in self.segments:
-        #     for chunk in segment:
-        #         data += chunk.dry_data
         
     def get_wet(self):
         chunks_data = [chunk.wet_data for segment in self.segments for chunk in segment]
         return np.concatenate(chunks_data)
-        # data=[]
-        # for segment in self.segments:
-        #     for chunk in segment:
-        #         data += chunk.wet_data
 
     def compute_wet_gain(self):
         rms_d = np.sqrt(np.mean(self.get_dry() ** 2))
@@ -155,7 +147,6 @@ class Track():
 class DataSet():
     def __init__(self, manifest_file, dry_file, wet_dir, chunk_seconds, param_names, param_configs, segment_size=20, silent_lead_in_seconds=8, trim_noise = True):
         self.tracks = []
-        self.n_segments = 0
         self.chunk_seconds = chunk_seconds
         self.param_names = param_names
         self.param_configs = param_configs
@@ -164,6 +155,7 @@ class DataSet():
         device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
 
         track_segments = []
+        print("loading dataset")
 
         # Get dry data
         print(f"Load dry: {dry_file}")
@@ -171,13 +163,15 @@ class DataSet():
         n_trim = int(silent_lead_in_seconds * sr)
         dry_trim = dry_full[n_trim:]
         chunk_len = int(chunk_seconds * sr)
+        print(f"chunk_len {chunk_len}")
+        print(f"segment_size {segment_size}")
 
         # Get wet data
         with open(manifest_file, 'r') as f:
             man_records = [json.loads(line) for line in f if line.strip()]
-        for man_record in man_records:
+        for i, man_record in enumerate(man_records):
             wet_file = wet_dir + '/' + man_record['id'] + '.wav'
-            print(f"Load wet: {wet_file}")
+            print(f"Load wet ({i}/{len(man_records)}): {wet_file}")
             wet_full, wet_sr = load_wav(wet_file)
 
             # Get params
@@ -198,27 +192,27 @@ class DataSet():
             n_chunks = n_samples // chunk_len # number of full chunks in data
             # print(f"n_samples {n_samples} w n_chunks {n_chunks}")
 
-            # Make chunks for this track
-            chunk_bucket=[]
-            segments=[]
-            for i in range(n_chunks):
-                s = i * chunk_len
+            dry_chunks_data = parse_to_subarrays(dry_aligned, chunk_len)
+            wet_chunks_data= parse_to_subarrays(wet_aligned, chunk_len)
+            chunks = [Chunk(dry_chunks_data[i].copy(), wet_chunks_data[i].copy(), params) for i in range(len(dry_chunks_data))]
 
-                chunk = Chunk(dry_aligned[s:s + chunk_len].copy(), wet_aligned[s:s + chunk_len].copy(), params)
-
-                chunk_bucket.append(chunk)
-                if (i+1) % segment_size == 0:
-                    segments.append(Segment(chunk_bucket, noise_profile))
-                    chunk_bucket = []
-            
+            segments_data = parse_to_subarrays(chunks, segment_size)
+            segments = [Segment(sd, noise_profile) for sd in segments_data]
             self.tracks.append(Track(segments))
-            del dry_aligned, wet_aligned, wet_full   # explicitly drop the full-track arrays now that chunking is done
-        
-        # resize tracks to equal length
-        self.n_segments = min([len(t.segments) for t in self.tracks])
-        self.tracks = [Track(track.segments[:self.n_segments]) for track in self.tracks]
 
-    def make_window_batches(self, track_size:int=30): # group for each trackset
+            del dry_aligned, wet_aligned, wet_full   # explicitly drop the full-track arrays now that chunking is done
+
+        print(f"# Chunks {len(chunks)}")
+        print(f"# Segments {len(segments)}")
+        print(f"# Tracks {len(self.tracks)}")
+
+        # resize tracks to equal length
+        min_segments = min([len(track) for track in self.tracks]) - 1 # -1 cuts off any partial segments
+        self.tracks = [t[:min_segments] for t in self.tracks]
+
+        print(f"# min_segments {min_segments}")
+
+    def make_window_batches(self, batch_size:int=30): # group for each trackset
         # track_size = batch_size
         # T_0 [  ][  ][  ]
         # T_1 [t0][t1][t2]
@@ -227,12 +221,11 @@ class DataSet():
         # T_3 [  ][  ][  ]
         # T_4 [t0][t1][t2]
         # T_4 [  ][  ][  ]
-        
         batch_groups=[]
-        for track_group in parse_to_subarrays(self.tracks, track_size):
+        for track_group in parse_to_subarrays(self.tracks, batch_size):
             batches=[]
-            for s_i in range(0, self.n_segments):
-                batches.append(Batch([track[s_i] for track in track_group], tag='window'))
+            for s in range(len(track_group[0])): # for t
+                batches.append(Batch([track[s] for track in track_group] , tag='window'))
             batch_groups.append(batches)
         return batch_groups
 
@@ -268,17 +261,11 @@ class DataSet():
         return iter(self.tracks)
 
     def apply_gain_model(self, gain_model):
-        for i, track in enumerate(self.tracks):
-            print('BEFORE')
-            for segment in track:
-                print(f'{i}: {segment.wet_gain}')
         for track in self.tracks:
+            gain=gain_model.predict(track)
             for segment in track:
-                segment.wet_gain = gain_model.predict(track)
-        for i, track in enumerate(self.tracks):
-            print('AFTER')
-            for segment in track:
-                print(f'{i}: {segment.wet_gain}')
+                segment.wet_gain = gain
+
 ##########################################################################################################################################
 ##########################################################################################################################################
 

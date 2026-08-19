@@ -15,7 +15,38 @@ class ConditionedLSTM(nn.Module):
         out = self.dense(out)
         return out, states
 
-def esr_loss(pred, target, eps=1e-8, min_energy=1e-4):
+# def esr_loss(pred, target, eps=1e-8, min_energy=1e-4):
+#     energy = torch.sum(target ** 2)
+#     return torch.sum((pred - target) ** 2) / (torch.maximum(energy, torch.tensor(min_energy)) + eps)
+
+
+# def dc_loss(pred, target, eps=1e-8):
+#     """Penalizes any DC offset difference (mean-level mismatch) between
+#     prediction and target -- ESR alone doesn't strongly constrain this."""
+#     target_var = torch.var(target) + eps
+#     return (torch.mean(pred) - torch.mean(target)) ** 2 / target_var
+
+# def pos_neg_balance_loss(pred, target, eps=1e-8):
+#     target_var = torch.var(target) + eps
+#     pred_pos_rms = torch.sqrt((pred.clamp(min=0) ** 2).mean() + eps)
+#     pred_neg_rms = torch.sqrt((pred.clamp(max=0) ** 2).mean() + eps)
+#     target_pos_rms = torch.sqrt((target.clamp(min=0) ** 2).mean() + eps)
+#     target_neg_rms = torch.sqrt((target.clamp(max=0) ** 2).mean() + eps)
+#     return ((pred_pos_rms - target_pos_rms) ** 2 + (pred_neg_rms - target_neg_rms) ** 2) / target_var
+
+# def combined_loss(pred, target, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=0.0):
+#     esr = esr_loss(pred, target)
+#     dc = dc_loss(pred, target)
+#     pos_neg_balance = pos_neg_balance_loss(pred, target)
+
+#     return [
+#         esr + dc_weight * dc + pos_neg_weight * pos_neg_balance,
+#         esr,
+#         dc,
+#         pos_neg_balance
+#     ]
+
+def esr_loss(pred, target, eps=1e-8, min_energy=1e-4, batch_size=None):
     energy = torch.sum(target ** 2)
     return torch.sum((pred - target) ** 2) / (torch.maximum(energy, torch.tensor(min_energy)) + eps)
 
@@ -34,10 +65,19 @@ def pos_neg_balance_loss(pred, target, eps=1e-8):
     target_neg_rms = torch.sqrt((target.clamp(max=0) ** 2).mean() + eps)
     return ((pred_pos_rms - target_pos_rms) ** 2 + (pred_neg_rms - target_neg_rms) ** 2) / target_var
 
-def combined_loss(pred, target, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=0.0):
-    esr = esr_loss(pred, target)
-    dc = dc_loss(pred, target)
-    pos_neg_balance = pos_neg_balance_loss(pred, target)
+def combined_loss(pred_batch, target_batch, batch_size, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=0.0, segment_size=None):
+
+    esr_losses, dc_losses, pos_neg_balance_losses = [], [], []
+
+    for i in range(len(pred_batch)):
+        seg_pred=pred_batch[i] # (56600, 1)
+        seg_target=target_batch[i] # (56600, 1)
+        esr_losses.append(esr_loss(seg_pred, seg_target))
+        dc_losses.append(dc_loss(seg_pred, seg_target))
+        pos_neg_balance_losses.append(pos_neg_balance_loss(seg_pred, seg_target))
+    esr = torch.stack(esr_losses).mean()
+    dc = torch.stack(dc_losses).mean()
+    pos_neg_balance = torch.stack(pos_neg_balance_losses).mean()
 
     return [
         esr + dc_weight * dc + pos_neg_weight * pos_neg_balance,
@@ -46,7 +86,40 @@ def combined_loss(pred, target, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=
         pos_neg_balance
     ]
 
+    # print(esr_losses)
 
+    # # Split batch into segments and calculate losses on segments separately
+    # if batch_size:
+    #     print(pred)
+    #     print(pred.shape) # ([30, 56600, 1])
+    #     batch_length = len(pred)
+    #     assert batch_length % segment_size == 0, f'predictions length must be a multiple of segment_size (batch_length={batch_length}, segment_size={segment_size})'
+        
+    #     esr_losses, dc_losses, pos_neg_balance_losses = [], [], []
+    #     for i in range(0, batch_length, segment_size):
+    #         seg_pred = pred[i:i+segment_size]
+    #         seg_target = target[i:i+segment_size]
+
+    #         esr_losses.append(esr_loss(seg_pred, seg_target))
+    #         dc_losses.append(dc_loss(seg_pred, seg_target))
+    #         pos_neg_balance_losses.append(pos_neg_balance_loss(seg_pred, seg_target))
+        
+    #     esr = torch.stack(esr_losses).mean()
+    #     dc = torch.stack(dc_losses).mean()
+    #     pos_neg_balance = torch.stack(pos_neg_balance_losses).mean()
+
+    # # Calculate losses on batch in entirety
+    # else:
+    #     esr = esr_loss(pred, target)
+    #     dc = dc_loss(pred, target)
+    #     pos_neg_balance = pos_neg_balance_loss(pred, target)
+
+    # return [
+    #     esr + dc_weight * dc + pos_neg_weight * pos_neg_balance,
+    #     esr,
+    #     dc,
+    #     pos_neg_balance
+    # ]
 ##########################################################################################################################################
 ##########################################################################################################################################
 
@@ -242,10 +315,11 @@ class GainModel():
         return self.coeffs
 
     def predict(self, track):
-        norm_params = track[0][0].normalize_params(self.param_configs)
+        chunk_0 = track[0][0]
+        norm_params = chunk_0.normalize_params(self.param_configs)
         d, f, v = norm_params['d'], norm_params['f'], norm_params['v']
         x = np.array([1, d, f, v, d*v, d*f, f*v, d*f*v, v**2, d**2, v**3])
-        return np.exp(x @ self.coeffs)
+        return float(np.exp(x @ self.coeffs)) # float64 to 32
 
     def validate(self, validation_dataset: DataSet): # validation_dataset is just 1 index array w/ cross val
         for i, track in enumerate(validation_dataset):
