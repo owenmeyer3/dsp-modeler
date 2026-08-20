@@ -2,7 +2,8 @@ import torch, datetime, os
 import torch.nn as nn
 import numpy as np
 from scipy.spatial import cKDTree
-from data_objects import DataSet
+from data_objects import DataSet, Track, Chunk, parse_to_subarrays
+from common.utils import write_wav
 
 class ConditionedLSTM(nn.Module):
     def __init__(self, input_size=4, hidden_size=20, num_layers=1):
@@ -15,6 +16,27 @@ class ConditionedLSTM(nn.Module):
         out = self.dense(out)
         return out, states
 
+    def predict_track(self, track, device, param_names, param_configs, chunk_seconds, sr=False, out_path=False):
+        preds_data = []
+        hidden = None
+        with torch.no_grad():
+            for i, chunk in enumerate(track):
+                features_tensor = chunk.get_features_tensor(device, param_names, param_configs)
+                pred, hidden = self(features_tensor, hidden)
+                preds_data.append(pred)
+
+            preds = np.concatenate(preds_data)
+
+        preds = np.clip(preds, -1.0, 1.0)
+        print(f"preds {preds.shape}")
+
+        if out_path and sr:
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            write_wav(out_path, preds, sr)
+
+        return Track.from_data(sr, chunk_seconds, track.get_params(), dry_data=track.get_dry(), wet_data=preds)
+
+            
 # def esr_loss(pred, target, eps=1e-8, min_energy=1e-4):
 #     energy = torch.sum(target ** 2)
 #     return torch.sum((pred - target) ** 2) / (torch.maximum(energy, torch.tensor(min_energy)) + eps)
@@ -65,7 +87,7 @@ def pos_neg_balance_loss(pred, target, eps=1e-8):
     target_neg_rms = torch.sqrt((target.clamp(max=0) ** 2).mean() + eps)
     return ((pred_pos_rms - target_pos_rms) ** 2 + (pred_neg_rms - target_neg_rms) ** 2) / target_var
 
-def combined_loss(pred_batch, target_batch, batch_size, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=0.0, segment_size=None):
+def combined_loss(pred_batch, target_batch, batch_size, esr_weight = 1.0, dc_weight=0.5, pos_neg_weight=0.0):
 
     esr_losses, dc_losses, pos_neg_balance_losses = [], [], []
 
@@ -301,7 +323,8 @@ class GainModel():
     def fit(self, train_dataset):
         ds, fs, vs, gs = [], [], [], []
         for track in train_dataset:
-            norm_params = track[0][0].normalize_params(self.param_configs)
+            chunk_0=track[0]
+            norm_params = chunk_0.normalize_params(self.param_configs)
             d, f, v = norm_params['d'], norm_params['f'], norm_params['v']
             ds.append(d)
             fs.append(f)
@@ -315,7 +338,7 @@ class GainModel():
         return self.coeffs
 
     def predict(self, track):
-        chunk_0 = track[0][0]
+        chunk_0=track[0]
         norm_params = chunk_0.normalize_params(self.param_configs)
         d, f, v = norm_params['d'], norm_params['f'], norm_params['v']
         x = np.array([1, d, f, v, d*v, d*f, f*v, d*f*v, v**2, d**2, v**3])

@@ -56,6 +56,10 @@ def train_manifest(
     best_loss, best_state, bad_epochs_count = float('inf'), None, 0
     print("      |                 LOSS                   |           PREDICTIONS         |         TARGET             ")
     print("EPOCH |    total     esr        dc     pos neg |     mean      std      skew   |    mean       std      skew")
+
+
+    train_denoised = True
+
     for epoch in range(epochs):
         e_time = datetime.datetime.now()
 
@@ -64,9 +68,9 @@ def train_manifest(
         
         for batch in train_dataset.batches_of_random(): # batched segments of no specified track or ts
             features_tensors = batch.get_features_tensor(device, param_names, param_configs)
-            # gains = batch.get_gains_tensor(device, param_names)
             target_tensors = batch.get_target_tensor(device)
 
+            # gains = batch.get_gains_tensor(device, param_names)
             # features_tensors = features_tensors * gains
 
             pred_tensors, _ = model(features_tensors, None) # torch.Size([30, 57600, 1])
@@ -75,7 +79,7 @@ def train_manifest(
 
             pred_for_loss = pred_tensors[:, warmup_samples:, :]
             target_for_loss = target_tensors[:, warmup_samples:, :]
-            loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, batch_size, dc_weight=0.5, pos_neg_weight=0.2, segment_size=train_dataset.segment_size)
+            loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, batch_size, dc_weight=0.5, pos_neg_weight=0.2)
 
             # Backprop
             optimizer.zero_grad() # clear old gradients
@@ -121,7 +125,7 @@ def train_manifest(
             for p in range(num_tracks):
                 eval_pred_p = torch.cat(eval_preds[p], dim=1)
                 eval_target_p = torch.cat(eval_targets[p], dim=1)
-                eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred_p, eval_target_p, batch_size, dc_weight=0.5, pos_neg_weight=0.2, segment_size=validation_dataset.segment_size)
+                eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred_p, eval_target_p, batch_size, dc_weight=0.5, pos_neg_weight=0.2)
                 eval_losss += eval_loss.item()
                 eval_esrs += eval_esr.item()
                 eval_dcs += eval_dc.item()
@@ -188,7 +192,7 @@ if __name__ == '__main__':
         'v':{'min':1, 'max':7, 'dtype':torch.float32},
     }
     chunk_seconds=0.03
-    trim_noise=False
+    denoise_wet=False
     silent_lead_in_seconds=8
 
     # fit gain finder model: ["d", "f", "v"] -> G by segment
@@ -217,7 +221,7 @@ if __name__ == '__main__':
         param_names, 
         param_configs, 
         silent_lead_in_seconds=silent_lead_in_seconds, 
-        trim_noise = trim_noise
+        denoise_wet = denoise_wet
     )
     # serieses=[]
     # serieses['dry'] = example_dataset[0].get_dry()
