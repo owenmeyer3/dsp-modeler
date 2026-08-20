@@ -4,6 +4,7 @@ import numpy as np
 from scipy.stats import skew
 from model_objects import ConditionedLSTM, combined_loss, TrackDataModel, TrackDataModel2, GainModel
 from data_objects import DataSet
+from eval.plot_waves import plot_waveforms
 
 def get_symmetry(x):
     x = x.flatten()
@@ -60,15 +61,19 @@ def train_manifest(
 
         # Training
         model.train()
+        
         for batch in train_dataset.batches_of_random(): # batched segments of no specified track or ts
-            # get 
-            apply_gain=True
-            features_tensors, target_tensors, gains = batch.get_tensors(device, param_names, param_configs, apply_gain=apply_gain) # adds gain param to segments
-            print(f"set {gains.shape}")
-            pred, _ = model(features_tensors, None)
-            if apply_gain: pred = pred / gains[:, None, None]   # (batch,) -> (batch, 1, 1), broadcasts against pred's (batch, seq_len, 1)
+            features_tensors = batch.get_features_tensor(device, param_names, param_configs)
+            # gains = batch.get_gains_tensor(device, param_names)
+            target_tensors = batch.get_target_tensor(device)
 
-            pred_for_loss = pred[:, warmup_samples:, :]
+            # features_tensors = features_tensors * gains
+
+            pred_tensors, _ = model(features_tensors, None) # torch.Size([30, 57600, 1])
+
+            # pred_tensors = pred_tensors / gains
+
+            pred_for_loss = pred_tensors[:, warmup_samples:, :]
             target_for_loss = target_tensors[:, warmup_samples:, :]
             loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, batch_size, dc_weight=0.5, pos_neg_weight=0.2, segment_size=train_dataset.segment_size)
 
@@ -92,14 +97,20 @@ def train_manifest(
             # Per Track group
             batch_groups = validation_dataset.make_window_batches(batch_size=batch_size)
             for batches in batch_groups:
-                for batch in batches:
-                    input_batch, target_batch, gains = batch.get_tensors(device,param_names,param_configs, apply_gain=apply_gain)
-                    pred_batch, eval_states = model(input_batch, eval_states)
-                    if apply_gain: pred_batch = pred_batch / gains[:, None, None]
+                for i, batch in enumerate(batches):
+
+                    features_tensors = batch.get_features_tensor(device, param_names, param_configs)
+                    # gains = batch.get_gains_tensor(device, param_names)
+                    target_tensors = batch.get_target_tensor(device)
+
+                    # features_tensors = features_tensors * gains
+                    pred_tensors, eval_states = model(features_tensors, eval_states)
+                    # pred_tensors = pred_tensors / gains
+
                     # Save pred, tgt in memory structure
                     for i, track in enumerate(batch):
-                        eval_preds[i].append(pred_batch[i:i+1])
-                        eval_targets[i].append(target_batch[i:i+1])
+                        eval_preds[i].append(pred_tensors[i:i+1])
+                        eval_targets[i].append(target_tensors[i:i+1])
 
             p_time =  datetime.datetime.now()
             if verbose_time: print(f"Prediction time: {p_time - t_time}")
@@ -177,7 +188,7 @@ if __name__ == '__main__':
         'v':{'min':1, 'max':7, 'dtype':torch.float32},
     }
     chunk_seconds=0.03
-    trim_noise=True
+    trim_noise=False
     silent_lead_in_seconds=8
 
     # fit gain finder model: ["d", "f", "v"] -> G by segment
@@ -195,8 +206,8 @@ if __name__ == '__main__':
     # print("Fit with X-Validation")
     # gain_model.cross_validate(full_dataset)
     # gain_model.save(f'/home/ubuntu/dsp-modeler/black_box/model/models/gain_model')
-    gain_model = GainModel(param_configs)
-    gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/gain_model/2026-08-18_20-17/gain_model.npz')
+    # gain_model = GainModel(param_configs)
+    # gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/gain_model/2026-08-18_20-17/gain_model.npz')
 
     example_dataset = DataSet(
         '/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl', 
@@ -208,7 +219,14 @@ if __name__ == '__main__':
         silent_lead_in_seconds=silent_lead_in_seconds, 
         trim_noise = trim_noise
     )
-    example_dataset.apply_gain_model(gain_model)
+    # serieses=[]
+    # serieses['dry'] = example_dataset[0].get_dry()
+    # serieses['pregain_wet'] = example_dataset[0].get_dry()
+    # example_dataset.calulcate_segments_gains(gain_model)
+    #example_dataset.calulcate_segments_noise_profile()
+    # serieses['postgain_wet'] = example_dataset[0].get_wet()
+    # eval.plot_waveforms(serieses, 96000, f'/home/ubuntu/dsp-modeler/black_box/model/models/gain_model/2026-08-18_20-17/eval_waveform.png',    chunk_seconds=2, zoom_seconds=0.05, title="half-time window")
+
 
     train_manifest(
         example_dataset,
@@ -305,5 +323,6 @@ if __name__ == '__main__':
 
     # track_data_model = TrackDataModel2(k=5, bandwidth=0.5)
     # track_data_model.train(train_dataset)
-    # track_data_model.save(f'/home/ubuntu/dsp-modeler/black_box/model/track_models')
+    # track_data_model.save(f'/home/ubuntu/dsp-mode
+    # ler/black_box/model/track_models')
     # track_data_model.validate(validation_dataset)
