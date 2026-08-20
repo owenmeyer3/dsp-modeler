@@ -339,3 +339,7 @@ class DataSet():
     def denoise_wet_data(self):
         for track in self.tracks:
             track.denoise_wet_data()
+
+    def add_model_gain(self):
+        for track in self.tracks:
+            track.add_model_gain()

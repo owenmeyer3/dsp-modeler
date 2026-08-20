@@ -211,7 +211,7 @@ if __name__ == '__main__':
     # t_dn_g_r.add_constant_gain(t_dn_g_r.compute_rms_gain())
 
     t_p = deepcopy(t)
-    t_p = Track.from_data(96000, chunk_seconds, t_p.get_params(), dry_data=t_p.get_dry(), wet_data=None)
+    t_p = Track.from_data(96000, chunk_seconds, {'d': 4.0, 'f': 4.0, 'v': 4.0}, dry_data=t_p.get_dry(), wet_data=None)
     t_p = model.predict_track(t_p, device, param_names, param_configs, chunk_seconds, sr=96000, out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav')
 
     waves = [

@@ -210,11 +210,11 @@ if __name__ == '__main__':
     # print("Fit with X-Validation")
     # gain_model.cross_validate(full_dataset)
     # gain_model.save(f'/home/ubuntu/dsp-modeler/black_box/model/models/gain_model')
-    # gain_model = GainModel(param_configs)
-    # gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/gain_model/2026-08-18_20-17/gain_model.npz')
+    gain_model = GainModel(param_configs)
+    gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/gain_model/2026-08-18_20-17/gain_model.npz')
 
-    example_dataset = DataSet(
-        '/home/ubuntu/dsp-modeler/black_box/data/train_single/manifest.jsonl', 
+    training_set = DataSet(
+        '/home/ubuntu/dsp-modeler/black_box/data/train/manifest.jsonl', 
         '/home/ubuntu/dsp-modeler/data/input/input.wav', 
         '/home/ubuntu/dsp-modeler/data/outputs', 
         chunk_seconds, 
@@ -223,18 +223,30 @@ if __name__ == '__main__':
         silent_lead_in_seconds=silent_lead_in_seconds, 
         denoise_wet = denoise_wet
     )
-    # serieses=[]
-    # serieses['dry'] = example_dataset[0].get_dry()
-    # serieses['pregain_wet'] = example_dataset[0].get_dry()
-    # example_dataset.calulcate_segments_gains(gain_model)
-    #example_dataset.calulcate_segments_noise_profile()
-    # serieses['postgain_wet'] = example_dataset[0].get_wet()
-    # eval.plot_waveforms(serieses, 96000, f'/home/ubuntu/dsp-modeler/black_box/model/models/gain_model/2026-08-18_20-17/eval_waveform.png',    chunk_seconds=2, zoom_seconds=0.05, title="half-time window")
+    training_set.compute_model_gain(gain_model)
+    training_set.add_model_gain()
+    training_set.calculate_noise_profiles()
+    training_set.denoise_wet_data()
+
+    validation_set = DataSet(
+        '/home/ubuntu/dsp-modeler/black_box/data/train/validation.jsonl', 
+        '/home/ubuntu/dsp-modeler/data/input/input.wav', 
+        '/home/ubuntu/dsp-modeler/data/outputs', 
+        chunk_seconds, 
+        param_names, 
+        param_configs, 
+        silent_lead_in_seconds=silent_lead_in_seconds, 
+        denoise_wet = denoise_wet
+    )
+    validation_set.compute_model_gain(gain_model)
+    validation_set.add_model_gain()
+    validation_set.calculate_noise_profiles()
+    validation_set.denoise_wet_data()
 
 
     train_manifest(
-        example_dataset,
-        example_dataset,
+        training_set,
+        validation_set,
         learning_rate=5e-4,
         epochs=10,
         warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
