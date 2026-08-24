@@ -2,7 +2,7 @@ import torch, datetime, copy, os
 import torch.optim as optim
 import numpy as np
 from scipy.stats import skew
-from model_objects import ConditionedLSTM, combined_loss, TrackDataModel, TrackDataModel2, GainModel
+from model_objects import ConditionedLSTM, combined_loss, LSGainModel
 from data_objects import DataSet
 from eval.plot_waves import plot_waveforms
 
@@ -94,14 +94,14 @@ def train_manifest(
         num_tracks = len(validation_dataset.tracks)
         with torch.no_grad():
         # Predictions
-            eval_states = None
             eval_preds = [[] for _ in range(num_tracks)]
             eval_targets = [[] for _ in range(num_tracks)]
 
             # Per Track group
             batch_groups = validation_dataset.make_window_batches(batch_size=batch_size)
-            for batches in batch_groups:
-                for i, batch in enumerate(batches):
+            for g_i, batch_group in enumerate(batch_groups):
+                eval_states = None
+                for batch in batch_group:
 
                     features_tensors = batch.get_features_tensor(device, param_names, param_configs)
                     # gains = batch.get_gains_tensor(device, param_names)
@@ -112,9 +112,10 @@ def train_manifest(
                     # pred_tensors = pred_tensors / gains
 
                     # Save pred, tgt in memory structure
-                    for i, track in enumerate(batch):
-                        eval_preds[i].append(pred_tensors[i:i+1])
-                        eval_targets[i].append(target_tensors[i:i+1])
+                    for t_i, track in enumerate(batch):
+                        global_track_idx = g_i * batch_size + t_i
+                        eval_preds[global_track_idx].append(pred_tensors[t_i:t_i+1])
+                        eval_targets[global_track_idx].append(target_tensors[t_i:t_i+1])
 
             p_time =  datetime.datetime.now()
             if verbose_time: print(f"Prediction time: {p_time - t_time}")
@@ -192,63 +193,48 @@ if __name__ == '__main__':
         'v':{'min':1, 'max':7, 'dtype':torch.float32},
     }
     chunk_seconds=0.03
-    denoise_wet=False
     silent_lead_in_seconds=8
 
-    # fit gain finder model: ["d", "f", "v"] -> G by segment
-    # gain_model = GainModel(param_configs=param_configs)
-    # full_dataset = DataSet(
-    #     '/home/ubuntu/dsp-modeler/data/outputs/odds-50.jsonl', 
-    #     '/home/ubuntu/dsp-modeler/data/input/input.wav', 
-    #     '/home/ubuntu/dsp-modeler/data/outputs', 
-    #     0.03, 
-    #     ["d", "f", "v"], 
-    #     {'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, 
-    #     silent_lead_in_seconds=8, 
-    #     trim_noise = True
-    # )
-    # print("Fit with X-Validation")
-    # gain_model.cross_validate(full_dataset)
-    # gain_model.save(f'/home/ubuntu/dsp-modeler/black_box/model/models/gain_model')
-    gain_model = GainModel(param_configs)
-    gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/gain_model/2026-08-18_20-17/gain_model.npz')
+
+    gain_model = LSGainModel() # trained on v>1, d>1
+    # Only one clear outlier: {'d':7,'f':5,'v':3} at 0.0704, +37% over — everything else in the set stays under ±26%.
+    gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model/2026-08-22_00-24/gain_model.npz')
 
     training_set = DataSet(
-        '/home/ubuntu/dsp-modeler/black_box/data/train/manifest.jsonl', 
+        '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 
         '/home/ubuntu/dsp-modeler/data/input/input.wav', 
         '/home/ubuntu/dsp-modeler/data/outputs', 
         chunk_seconds, 
         param_names, 
         param_configs, 
-        silent_lead_in_seconds=silent_lead_in_seconds, 
-        denoise_wet = denoise_wet
+        silent_lead_in_seconds=silent_lead_in_seconds    
     )
-    training_set.compute_model_gain(gain_model)
-    training_set.add_model_gain()
+    print('LOADED')
     training_set.calculate_noise_profiles()
     training_set.denoise_wet_data()
-
-    validation_set = DataSet(
-        '/home/ubuntu/dsp-modeler/black_box/data/train/validation.jsonl', 
-        '/home/ubuntu/dsp-modeler/data/input/input.wav', 
-        '/home/ubuntu/dsp-modeler/data/outputs', 
-        chunk_seconds, 
-        param_names, 
-        param_configs, 
-        silent_lead_in_seconds=silent_lead_in_seconds, 
-        denoise_wet = denoise_wet
-    )
-    validation_set.compute_model_gain(gain_model)
-    validation_set.add_model_gain()
-    validation_set.calculate_noise_profiles()
-    validation_set.denoise_wet_data()
-
+    training_set.compute_model_gain(gain_model)
+    training_set.add_model_gain()
+    print('PROCESSED')
+    # validation_set = DataSet(
+    #     '/home/ubuntu/dsp-modeler/black_box/data/train/validation.jsonl', 
+    #     '/home/ubuntu/dsp-modeler/data/input/input.wav', 
+    #     '/home/ubuntu/dsp-modeler/data/outputs', 
+    #     chunk_seconds, 
+    #     param_names, 
+    #     param_configs, 
+    #     silent_lead_in_seconds=silent_lead_in_seconds, 
+    #     denoise_wet = denoise_wet
+    # )
+    # validation_set.compute_model_gain(gain_model)
+    # validation_set.add_model_gain()
+    # validation_set.calculate_noise_profiles()
+    # validation_set.denoise_wet_data()
 
     train_manifest(
         training_set,
-        validation_set,
+        training_set,
         learning_rate=5e-4,
-        epochs=10,
+        epochs=40,
         warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
         param_names=["d", "f", "v"],
         param_configs={
@@ -262,83 +248,6 @@ if __name__ == '__main__':
         lr_factor = 0.5,
         batch_size=30,
         hidden_size=20,
-        verbose_time=False,
+        verbose_time=True,
         verbose_performance = False
     )
-    # find noise profile model: ["d", "f", "v"] -> n_p by segment
-
-
-    # Load data (with removed Noise - noise profile loves on segments)
-    # train_dataset = DataSet(
-    #     '/home/ubuntu/dsp-modeler/black_box/data/validation/manifest.jsonl', 
-    #     '/home/ubuntu/dsp-modeler/data/input/input.wav', 
-    #     '/home/ubuntu/dsp-modeler/data/outputs', 
-    #     chunk_seconds, 
-    #     param_names, 
-    #     param_configs, 
-    #     silent_lead_in_seconds=silent_lead_in_seconds, 
-    #     trim_noise = trim_noise
-    # )
-    # validation_dataset = DataSet(
-    #     '/home/ubuntu/dsp-modeler/black_box/data/train/manifest-5.jsonl', 
-    #     '/home/ubuntu/dsp-modeler/data/input/input.wav', 
-    #     '/home/ubuntu/dsp-modeler/data/outputs', 
-    #     chunk_seconds, 
-    #     param_names, 
-    #     param_configs, 
-    #     silent_lead_in_seconds=silent_lead_in_seconds, 
-    #     trim_noise = trim_noise
-    # )
-    # train_manifest(
-    #     train_dataset,
-    #     validation_dataset,
-    #     learning_rate=5e-4,
-    #     epochs=20,
-    #     warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
-    #     param_names=["d", "f", "v"],
-    #     param_configs={
-    #         'd':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'f':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'v':{'min':1, 'max':7, 'dtype':torch.float32},
-    #     },
-    #     device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-    #     model_output_dir=f'/home/ubuntu/dsp-modeler/black_box/model/models',
-    #     lr_patience = 6,
-    #     lr_factor = 0.5,
-    #     batch_size=30,
-    #     hidden_size=20,
-    #     verbose_time=False,
-    #     verbose_performance = False
-    # )
-
-    # train_manifest(
-    #     wet_dir='/home/ubuntu/dsp-modeler/data/outputs',
-    #     learning_rate=5e-4,
-    #     epochs=20,
-    #     warmup_samples=1000, # only applied to the first chunk -- state is cold there; every later chunk inherits an already-"settled" hidden state
-    #     silent_lead_in_seconds=8,
-    #     chunk_seconds=0.03,
-    #     param_names=["d", "f", "v"],
-    #     param_configs={
-    #         'd':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'f':{'min':1, 'max':7, 'dtype':torch.float32},
-    #         'v':{'min':1, 'max':7, 'dtype':torch.float32},
-    #     },
-    #     train_manifest='/home/ubuntu/dsp-modeler/black_box/data/train/manifest.jsonl',
-    #     validation_manifest='/home/ubuntu/dsp-modeler/black_box/data/validation/manifest-15.jsonl',
-    #     dry_file='/home/ubuntu/dsp-modeler/data/input/input.wav',
-    #     device='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'),
-    #     model_output_dir = f'/home/ubuntu/dsp-modeler/black_box/model/models',
-    #     trim_noise=True,
-    #     lr_patience = 6,
-    #     lr_factor = 0.5,
-    #     verbose_time=False,
-    #     verbose_performance = False,
-    #     hidden_size=40
-    # )
-
-    # track_data_model = TrackDataModel2(k=5, bandwidth=0.5)
-    # track_data_model.train(train_dataset)
-    # track_data_model.save(f'/home/ubuntu/dsp-mode
-    # ler/black_box/model/track_models')
-    # track_data_model.validate(validation_dataset)

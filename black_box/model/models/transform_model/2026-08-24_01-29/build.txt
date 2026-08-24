@@ -1,0 +1,169 @@
+{'SILENT_LEADIN_SECONDS': 8.0}
+loading dataset
+Load dry: /home/ubuntu/dsp-modeler/data/input/input.wav
+chunk_len 2880
+sr 96000
+Load wet (0/38): /home/ubuntu/dsp-modeler/data/outputs/a4c49ad9-6ff5-4287-80a1-0d7ae2028d70.wav
+delay_samples 12616
+Load wet (1/38): /home/ubuntu/dsp-modeler/data/outputs/95acc994-d2f5-40a8-8ea1-fe873eccf4a5.wav
+delay_samples 12615
+Load wet (2/38): /home/ubuntu/dsp-modeler/data/outputs/4f414f4e-d162-48b0-b76e-827ce338c7a4.wav
+delay_samples 40295
+Load wet (3/38): /home/ubuntu/dsp-modeler/data/outputs/1f9fd0a8-1608-41b4-b7e5-2c697b39a4f1.wav
+delay_samples 40296
+Load wet (4/38): /home/ubuntu/dsp-modeler/data/outputs/d3e740ee-f3f2-427f-b77f-c9c504f3b337.wav
+delay_samples 40297
+Load wet (5/38): /home/ubuntu/dsp-modeler/data/outputs/fc355e07-2a25-4175-8228-ea233dd87530.wav
+delay_samples 40305
+Load wet (6/38): /home/ubuntu/dsp-modeler/data/outputs/9ae56464-9098-4e71-aa6c-7b5372557066.wav
+delay_samples 40296
+Load wet (7/38): /home/ubuntu/dsp-modeler/data/outputs/8a66e248-fa4d-4150-9c1d-4f62e58c99be.wav
+delay_samples 40295
+Load wet (8/38): /home/ubuntu/dsp-modeler/data/outputs/22f39325-3b01-47e5-8f4e-53adda47b533.wav
+delay_samples 40312
+Load wet (9/38): /home/ubuntu/dsp-modeler/data/outputs/bfcf872e-246b-4b09-bbde-ea00ed71eb56.wav
+delay_samples 40302
+Load wet (10/38): /home/ubuntu/dsp-modeler/data/outputs/b4f398df-7efd-4fe4-abc5-543d985ec5ec.wav
+delay_samples 40306
+Load wet (11/38): /home/ubuntu/dsp-modeler/data/outputs/940b831f-767a-41c1-8920-f1b7d0708161.wav
+delay_samples 40307
+Load wet (12/38): /home/ubuntu/dsp-modeler/data/outputs/89e8244d-a91d-47e5-a3cb-ed8311877330.wav
+delay_samples 40394
+Load wet (13/38): /home/ubuntu/dsp-modeler/data/outputs/a2f9a1b9-7eb8-4154-8bb0-25a0b3ecadec.wav
+delay_samples 40382
+Load wet (14/38): /home/ubuntu/dsp-modeler/data/outputs/c4a89e8e-a14c-4078-9ca4-f5151a2821d4.wav
+delay_samples 40396
+Load wet (15/38): /home/ubuntu/dsp-modeler/data/outputs/240ae8cc-c953-455d-9391-e06ff7c91643.wav
+delay_samples 40395
+Load wet (16/38): /home/ubuntu/dsp-modeler/data/outputs/e4351c65-ff67-47a1-83f3-a2c449cc13b9.wav
+delay_samples 40386
+Load wet (17/38): /home/ubuntu/dsp-modeler/data/outputs/d55365af-754f-42de-8015-387a362d3eaf.wav
+delay_samples 40383
+Load wet (18/38): /home/ubuntu/dsp-modeler/data/outputs/053791e2-4034-4a3a-86bf-74c56bbc241f.wav
+delay_samples 40314
+Load wet (19/38): /home/ubuntu/dsp-modeler/data/outputs/e631eb35-382c-44e6-ad75-e1e08b9ec28c.wav
+delay_samples 40306
+Load wet (20/38): /home/ubuntu/dsp-modeler/data/outputs/8bd1a579-014f-43d8-bf26-5c6fcd16f2f6.wav
+delay_samples 40317
+Load wet (21/38): /home/ubuntu/dsp-modeler/data/outputs/ea746670-011b-4273-bd1b-c9b6918f2888.wav
+delay_samples 40306
+Load wet (22/38): /home/ubuntu/dsp-modeler/data/outputs/55cc492c-702c-4277-af3a-1592fccf28d5.wav
+delay_samples 40320
+Load wet (23/38): /home/ubuntu/dsp-modeler/data/outputs/aefde7de-68c1-4fd7-91e6-4b17ccb23085.wav
+delay_samples 40322
+Load wet (24/38): /home/ubuntu/dsp-modeler/data/outputs/757cbf5e-fac6-401e-b58c-2fec47fd70a8.wav
+delay_samples 40298
+Load wet (25/38): /home/ubuntu/dsp-modeler/data/outputs/ebfa9df3-8932-4f19-a1cc-1d060742a890.wav
+delay_samples 40301
+Load wet (26/38): /home/ubuntu/dsp-modeler/data/outputs/e91663ee-85b2-4937-9969-f36403e5cf71.wav
+delay_samples 40283
+Load wet (27/38): /home/ubuntu/dsp-modeler/data/outputs/df7c76f9-576e-433c-9f13-b672762e2bee.wav
+delay_samples 40284
+Load wet (28/38): /home/ubuntu/dsp-modeler/data/outputs/3f152aa1-5f6d-4764-bc4b-bb1022c11418.wav
+delay_samples 40283
+Load wet (29/38): /home/ubuntu/dsp-modeler/data/outputs/7b96476c-84b2-4d4c-9b5d-d821b3e86506.wav
+delay_samples 40294
+Load wet (30/38): /home/ubuntu/dsp-modeler/data/outputs/7755cf55-8e4a-4e1d-be2b-cf0b74841d1d.wav
+delay_samples 40283
+Load wet (31/38): /home/ubuntu/dsp-modeler/data/outputs/4e4b8863-5d11-4b04-88d1-d4b365a3768c.wav
+delay_samples 40298
+Load wet (32/38): /home/ubuntu/dsp-modeler/data/outputs/c903b5a3-ae7f-4aef-8efe-f1e6aea1d43b.wav
+delay_samples 40306
+Load wet (33/38): /home/ubuntu/dsp-modeler/data/outputs/a89fbfc2-1f1c-4f99-9feb-4935c8d39b95.wav
+delay_samples 40301
+Load wet (34/38): /home/ubuntu/dsp-modeler/data/outputs/c143c81b-8918-4322-a3e5-2ea9c322d198.wav
+delay_samples 40302
+Load wet (35/38): /home/ubuntu/dsp-modeler/data/outputs/77e601a7-66ef-4e54-842e-4df967624157.wav
+delay_samples 40319
+Load wet (36/38): /home/ubuntu/dsp-modeler/data/outputs/6db7afba-37f5-41b3-8644-723f65f75ece.wav
+delay_samples 40304
+Load wet (37/38): /home/ubuntu/dsp-modeler/data/outputs/327f4f84-1ebe-4107-8a71-90f6d58ec665.wav
+delay_samples 40304
+# Chunks / Track 8120
+# Tracks 38
+# min_chunks 8119
+LOADED
+PROCESSED
+Prep took 0:00:01.373114
+      |                 LOSS                   |           PREDICTIONS         |         TARGET             
+EPOCH |    total     esr        dc     pos neg |     mean      std      skew   |    mean       std      skew
+Train time: 0:09:26.044598
+Prediction time: 0:01:58.849473
+01/20 |  +01.009   +00.878 / +00.001 / +00.658 |  -0.00106 / +0.00958 / +0.49  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:57.341239
+Train time: 0:10:15.442833
+Prediction time: 0:02:01.218133
+02/20 |  +00.943   +00.840 / +00.000 / +00.512 |  +0.00058 / +0.01467 / +0.29  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:55.060201
+Train time: 0:10:27.509498
+Prediction time: 0:01:59.160440
+03/20 |  +00.916   +00.827 / +00.000 / +00.441 |  -0.00010 / +0.01726 / +0.14  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:55.467188
+Train time: 0:10:27.812230
+Prediction time: 0:02:00.361628
+04/20 |  +00.905   +00.822 / +00.000 / +00.413 |  -0.00029 / +0.01837 / +0.04  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:54.559135
+Train time: 0:10:26.057523
+Prediction time: 0:02:00.097372
+05/20 |  +00.892   +00.817 / +00.000 / +00.374 |  -0.00062 / +0.02009 / +0.46  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:57.921003
+Train time: 0:10:22.486571
+Prediction time: 0:01:59.655926
+06/20 |  +00.854   +00.776 / +00.001 / +00.388 |  -0.00102 / +0.01938 / +0.35  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:51.847441
+Train time: 0:10:30.484589
+Prediction time: 0:02:00.988200
+07/20 |  +00.648   +00.611 / +00.009 / +00.162 |  -0.00476 / +0.03117 / -0.13  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:47.269968
+Train time: 0:10:25.626069
+Prediction time: 0:01:59.501370
+08/20 |  +00.546   +00.521 / +00.006 / +00.111 |  -0.00361 / +0.03591 / -0.09  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:49.762672
+Train time: 0:10:23.821743
+Prediction time: 0:02:00.177742
+09/20 |  +00.470   +00.449 / +00.002 / +00.103 |  -0.00197 / +0.03758 / -0.36  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:50.022731
+Train time: 0:10:24.819165
+Prediction time: 0:01:58.721831
+10/20 |  +00.448   +00.417 / +00.001 / +00.153 |  +0.00006 / +0.03372 / -0.45  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:48.737294
+Train time: 0:10:27.534550
+Prediction time: 0:01:59.680986
+11/20 |  +00.356   +00.335 / +00.002 / +00.098 |  -0.00097 / +0.03926 / -0.69  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:48.048280
+Train time: 0:10:25.729094
+Prediction time: 0:02:00.648582
+12/20 |  +00.374   +00.342 / +00.018 / +00.115 |  -0.00679 / +0.03710 / -0.65  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:54.430458
+Train time: 0:10:27.559763
+Prediction time: 0:02:01.216850
+13/20 |  +00.307   +00.288 / +00.002 / +00.093 |  -0.00170 / +0.03964 / -0.77  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:48.199882
+Train time: 0:10:25.404349
+Prediction time: 0:02:00.066442
+14/20 |  +00.323   +00.300 / +00.005 / +00.103 |  -0.00337 / +0.03848 / -0.75  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:46.356526
+Train time: 0:10:27.039169
+Prediction time: 0:02:00.133898
+15/20 |  +00.430   +00.403 / +00.008 / +00.119 |  -0.00421 / +0.03709 / -0.74  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:40.517564
+Train time: 0:10:24.104613
+Prediction time: 0:01:58.020700
+16/20 |  +00.405   +00.378 / +00.008 / +00.114 |  -0.00437 / +0.03789 / -0.93  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:38.723254
+Train time: 0:10:26.440958
+Prediction time: 0:01:59.779749
+17/20 |  +00.390   +00.365 / +00.009 / +00.105 |  -0.00450 / +0.03902 / -0.89  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:37.907166
+Train time: 0:10:23.589276
+Prediction time: 0:01:59.176176
+18/20 |  +00.325   +00.303 / +00.006 / +00.097 |  -0.00373 / +0.04011 / -1.02  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:43.383570
+Train time: 0:09:44.296511
+Prediction time: 0:01:58.850110
+19/20 |  +00.289   +00.261 / +00.018 / +00.095 |  -0.00664 / +0.04144 / -0.88  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:55.090166
+Train time: 0:10:24.395670
+Prediction time: 0:02:00.602801
+20/20 |  +00.232   +00.216 / +00.002 / +00.076 |  -0.00165 / +0.04328 / -0.94  |  +0.00003 / +0.05155 / -0.85
+Validation time: 0:02:55.747799

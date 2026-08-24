@@ -7,6 +7,7 @@ def parse_s3_uri(uri):
     return bucket, key
 
 def write_wav(path, data, sample_rate):
+    data = np.clip(data, -1.0, 1.0)
     sf.write(path, data, sample_rate, subtype="PCM_24")
 
 def load_wav(path):

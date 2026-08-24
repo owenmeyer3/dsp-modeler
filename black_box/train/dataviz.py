@@ -1,11 +1,13 @@
 from data_objects import Track, DataSet
-from model_objects import GainModel, ConditionedLSTM
+from model_objects import ConditionedLSTM, LSGainModel
 import torch
 from copy import deepcopy
 import numpy as np
 import matplotlib.pyplot as plt
 from common.utils import load_wav
 from common.delay_ops import measure_delay, apply_shift
+from eval.spectral_compare_db import plot_average_spectrum
+
 
 def fit(train_dataset):
     ds, fs, vs, gs = [], [], [], []
@@ -173,75 +175,95 @@ if __name__ == '__main__':
         'v':{'min':1, 'max':7, 'dtype':torch.float32},
     }
     chunk_seconds=0.03
-    denoise_wet=False
     silent_lead_in_seconds=8
 
-    gain_model = GainModel(param_configs)
-    gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/gain_model/2026-08-18_20-17/gain_model.npz')
+    #####################################################
+    # 
+    #####################################################
 
-    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
-    model = ConditionedLSTM(input_size=4, hidden_size=20).to(device)
-    model.load_state_dict(torch.load('/home/ubuntu/dsp-modeler/black_box/model/models/transform_model/2026-08-20_15-01/model_best.pt', map_location=device))
-    model.eval()
+    # example_dataset = DataSet(
+    #     '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 
+    #     '/home/ubuntu/dsp-modeler/data/input/input.wav', 
+    #     '/home/ubuntu/dsp-modeler/data/outputs', 
+    #     chunk_seconds, 
+    #     param_names, 
+    #     param_configs, 
+    #     silent_lead_in_seconds=silent_lead_in_seconds, 
+    #     dbg_tracks = [1]
+    # )
+    # print(example_dataset.tracks)
+    # for trk in example_dataset:
+    #     print(f"TRACK {trk.id} {trk.get_params()}")
+
+    # trk = deepcopy(example_dataset[0])
+
+    # gain_model = LSGainModel(param_configs)
+    # gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model/2026-08-22_00-24/gain_model.npz')
+    # example_dataset.calculate_noise_profiles()
+    # example_dataset.denoise_wet_data()
+    # example_dataset.compute_model_gain(gain_model)
+    # example_dataset.add_model_gain()
+
+    # trk_mod = deepcopy(example_dataset[0])
+
+    # waves = [
+    #     {'name':'dry',     'track':trk,     'channel':'dry'},
+    #     {'name':'wet',     'track':trk,     'channel':'wet'},
+    #     {'name':'wet_mod', 'track':trk_mod, 'channel':'wet'}
+    # ]
+    # print_track_section(waves, 1, 5, zoom_start_s=2, zoom_len=0.15,title="Silence", out_path='/home/ubuntu/dsp-modeler/black_box/train/viz/test_sln.png')
+    # print_track_section(waves, 7, 17, zoom_start_s=11.95, zoom_len=0.15,title="Sound", out_path='/home/ubuntu/dsp-modeler/black_box/train/viz/test.png')
+
+    #####################################################
+    # Single track from dataset - predict and compare
+    #####################################################
+    gain_model = LSGainModel(param_configs)
+    gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model/2026-08-22_00-24/gain_model.npz')
 
     example_dataset = DataSet(
-        '/home/ubuntu/dsp-modeler/black_box/data/examples/manifest_5_5_7.jsonl', 
+        '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 
         '/home/ubuntu/dsp-modeler/data/input/input.wav', 
         '/home/ubuntu/dsp-modeler/data/outputs', 
         chunk_seconds, 
         param_names, 
         param_configs, 
         silent_lead_in_seconds=silent_lead_in_seconds, 
-        denoise_wet = denoise_wet
+        dbg_tracks = [37]
     )
-    t = deepcopy(example_dataset.tracks[0])
+    print(example_dataset.tracks)
+    for trk in example_dataset:
+        print(f"TRACK {trk.id} {trk.get_params()}")
+    trk = deepcopy(example_dataset[0])
+    trk_dry=trk.get_dry()
+    trk_wet=trk.get_wet()
 
-    t_dn = deepcopy(t)
-    t_dn.compute_noise_profile(silent_lead_in_seconds=8)
-    t_dn.denoise_wet_data()
+    mod_trk = deepcopy(trk)
+    mod_trk.compute_noise_profile()
+    mod_trk.denoise_wet_data()
 
-    # t_g_m = deepcopy(t)
-    # t_g_m.compute_model_gain(gain_model)
-    # t_g_m.add_model_gain()
+    print(f'trk {mod_trk.get_wet().shape}')
 
-    # t_g_r = deepcopy(t)
-    # t_g_r.add_constant_gain(t_g_r.compute_rms_gain())
+    params=trk.get_params()
 
-    # t_dn_g_r = deepcopy(t_dn)
-    # t_dn_g_r.add_constant_gain(t_dn_g_r.compute_rms_gain())
+    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    model = ConditionedLSTM(input_size=4, hidden_size=20).to(device)
+    model.load_state_dict(torch.load('/home/ubuntu/dsp-modeler/black_box/model/models/transform_model/2026-08-24_13-02/model_best.pt', map_location=device))
 
-    t_p = deepcopy(t)
-    t_p = Track.from_data(96000, chunk_seconds, {'d': 4.0, 'f': 4.0, 'v': 4.0}, dry_data=t_p.get_dry(), wet_data=None)
-    t_p = model.predict_track(t_p, device, param_names, param_configs, chunk_seconds, sr=96000, out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav')
+    trk_f = Track.from_data(96000, chunk_seconds, params, dry_data=trk_dry, wet_data=None)
+    trk_p = model.predict_track(trk_f, device, param_names, param_configs, chunk_seconds)#, out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav')
+    trk_p.compute_model_gain(gain_model) # gain for these params
+    trk_p.inverse_model_gain()
 
     waves = [
-        {'name':'dry', 'track':t, 'channel':'dry'},
-        {'name':'wet', 'track':t, 'channel':'wet'},
-        # {'name':'wet_dn', 'track':t2, 'channel':'wet'},
-        # {'name':'wet_mdl_gn', 'track':t3, 'channel':'wet'},
-        # {'name':'wet_rms_gn', 'track':t4, 'channel':'wet'},
-        # {'name':'t_dn_g_r', 'track':t_dn_g_r, 'channel':'wet'},
-        {'name':'preds', 'track':t_p, 'channel':'wet'},
+        #{'name':'dry',     'track':trk,     'channel':'dry'},
+        {'name':'wet_dn',  'track':mod_trk,     'channel':'wet'},
+        {'name':'trk_p',   'track':trk_p, 'channel':'wet'}
     ]
+    print_track_section(waves, 1, 5, zoom_start_s=2, zoom_len=0.15,title="Silence", out_path='/home/ubuntu/dsp-modeler/black_box/train/viz/test_sln.png')
+    print_track_section(waves, 7, 17, zoom_start_s=11.95, zoom_len=0.15,title="Sound", out_path='/home/ubuntu/dsp-modeler/black_box/train/viz/test.png')
+    print(f'trk {mod_trk.get_wet().shape}')
+    print(f'trk_p {trk_p.get_wet().shape}')
+    serieses = {'trk': mod_trk.get_wet(), 'trk_p': trk_p.get_wet()}
 
-
-    print_track_section(waves, 1, 5, zoom_start_s=11.95, zoom_len=0.15,title="Title", out_path='/home/ubuntu/dsp-modeler/black_box/train/viz/test.png')
-
-    # waves = [
-    #     {
-    #         'name':'dry', 
-    #         'data':load_wav("/home/ubuntu/dsp-modeler/data/input/input.wav")[0], 
-    #         "sample_rate":96000
-    #     },
-    #     {
-    #         'name':'wet', 
-    #         'data':load_wav("/home/ubuntu/dsp-modeler/data/outputs/8bd1a579-014f-43d8-bf26-5c6fcd16f2f6.wav")[0], 
-    #         "sample_rate":96000
-    #     }
-    # ]
-
-    # print_wav_data_section(waves, 4, 15, zoom_start_s=9.9, zoom_len=0.2,title="Title", out_path='/home/ubuntu/dsp-modeler/black_box/train/viz/test.png')
-
-
-
-
+    plot_average_spectrum(serieses, 96000, f'/home/ubuntu/dsp-modeler/black_box/train/viz/eval_db_spectrum_sln.png', start_seconds=1)
+    plot_average_spectrum(serieses, 96000, f'/home/ubuntu/dsp-modeler/black_box/train/viz/eval_db_spectrum.png', start_seconds=12.5)

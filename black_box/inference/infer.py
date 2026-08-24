@@ -99,10 +99,10 @@ def infer(
     pred = np.concatenate(preds)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    pred_clipped = np.clip(pred, -1.0, 1.0)
+    #pred = np.clip(pred, -1.0, 1.0)
     # match the source files' 32-bit (24-in-32) container instead of
     # downconverting to 16-bit
-    write_wav(out_path, pred_clipped, sr)
+    write_wav(out_path, pred, sr)
     print(f"Wrote {out_path}")
     print(f"pred stats: min={pred.min():.4f}, max={pred.max():.4f}, std={pred.std():.4f}")
 
@@ -110,7 +110,7 @@ if __name__ == "__main__":
     infer(
         dry_path='/home/ubuntu/dsp-modeler/data/input/input.wav',
         out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav',
-        checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/2026-08-15_00-14/model_best.pt',
+        checkpoint = '/home/ubuntu/dsp-modeler/black_box/model/models/transform_model/2026-08-23_20-41/model_best.pt',
         block_seconds=0.1,  # matches the order of magnitude training already ran thousands of forward passes at without incident
         param_configs={
             'd': {'min': 1, 'max': 7, 'dtype': torch.float32},

@@ -115,11 +115,12 @@ class Batch():
 
 
 class Track():
-    def __init__(self, chunks, sr):
+    def __init__(self, chunks, sr, id=None):
         self.chunks:list[Chunk]=chunks
         self.gain = None
         self.noise_profile=None
         self.sample_rate=sr
+        self.id=id
 
     def shuffle(self, seed=42):
         random.seed(seed)
@@ -170,7 +171,7 @@ class Track():
             offset += n
 
     def add_model_gain(self):
-        trk_wet_data = self.get_wet() * self.gain
+        trk_wet_data = self.get_wet() / self.gain
         # re-split back into each chunk's original length
         offset = 0
         for chunk in self.chunks:
@@ -179,7 +180,7 @@ class Track():
             offset += n
 
     def inverse_model_gain(self):
-        trk_wet_data = self.get_wet() / self.gain
+        trk_wet_data = self.get_wet() * self.gain
         # re-split back into each chunk's original length
         offset = 0
         for chunk in self.chunks:
@@ -215,7 +216,7 @@ class Track():
 
 
 class DataSet():
-    def __init__(self, manifest_file, dry_file, wet_dir, chunk_seconds, param_names, param_configs, silent_lead_in_seconds=8, denoise_wet = True):
+    def __init__(self, manifest_file, dry_file, wet_dir, chunk_seconds, param_names, param_configs, silent_lead_in_seconds=8, dbg_tracks=None):
         self.tracks:list[Track] = []
         self.sample_rate=None
         self.chunk_seconds = chunk_seconds
@@ -239,6 +240,8 @@ class DataSet():
         with open(manifest_file, 'r') as f:
             man_records = [json.loads(line) for line in f if line.strip()]
         for i, man_record in enumerate(man_records):
+            if dbg_tracks and i not in dbg_tracks:
+                continue
             wet_file = wet_dir + '/' + man_record['id'] + '.wav'
             print(f"Load wet ({i}/{len(man_records)}): {wet_file}")
             wet_full, wet_sr = load_wav(wet_file)
@@ -248,9 +251,6 @@ class DataSet():
             # Get params
             params=man_record['params']
 
-
-            # dry_aligned, wet_aligned = wet_trim, dry_trim
-
             # Align dry and wet
             delay_samples, sr = measure_delay(wet_trim, dry_trim, sr, cluster_window_seconds=0.01, verbose=False)
             print(f"delay_samples {delay_samples}")
@@ -259,7 +259,7 @@ class DataSet():
             dry_chunks_data = parse_to_subarrays(dry_aligned, chunk_len)
             wet_chunks_data= parse_to_subarrays(wet_aligned, chunk_len)
             chunks = [Chunk(dry_chunks_data[i].copy(), wet_chunks_data[i].copy(), params) for i in range(len(dry_chunks_data))]
-            self.tracks.append(Track(chunks, sr))
+            self.tracks.append(Track(chunks, sr, man_record['id']))
 
             del dry_aligned, wet_aligned, wet_full   # explicitly drop the full-track arrays now that chunking is done
 
@@ -269,13 +269,22 @@ class DataSet():
         # resize tracks to equal length
         min_chunks = min([len(track) for track in self.tracks]) - 1 # -1 cuts off any partial chunks
 
-        self.tracks = [Track(t[:min_chunks], sr) for t in self.tracks]
-
-        if denoise_wet:
-            self.denoise_wet_data()
+        self.tracks = [Track(t[:min_chunks], sr, t.id) for t in self.tracks]
 
         print(f"# min_chunks {min_chunks}")
 
+    def __len__(self):
+        return len(self.tracks)
+
+    def __getitem__(self, idx):
+        return self.tracks[idx]
+
+    def append(self, track):
+        self.tracks.append(track)
+
+    def __iter__(self):
+        return iter(self.tracks)
+    
     def make_window_batches(self, batch_size:int=30): # group for each trackset
         # track_size = batch_size
         # T_0 [  ][  ][  ]
