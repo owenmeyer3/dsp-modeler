@@ -273,7 +273,7 @@ class LSGainModel():
             ds.append(d)
             fs.append(f)
             vs.append(v)
-            gs.append(track.compute_rms_gain())
+            gs.append(track.gain)
 
         ds, fs, vs, gs = np.array(ds), np.array(fs), np.array(vs), np.array(gs)
         X = np.column_stack([np.ones_like(ds), ds, fs, vs, ds*vs, ds*fs, fs*vs, ds*fs*vs, vs**2, ds**2, vs**3])
@@ -318,8 +318,82 @@ class LSGainModel():
 ##########################################################################################################################################
 ##########################################################################################################################################
 
+
+class LSNoiseModel():
+    def __init__(
+        self,
+        param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}},
+        silent_lead_in_seconds=8
+    ):
+        self.coeffs = None
+        self.param_configs = param_configs
+        self.silent_lead_in_seconds=silent_lead_in_seconds
+
+        
+
+    def fit(self, train_dataset):
+        ds, fs, vs, ns = [], [], [], []
+        for track in train_dataset:
+            chunk_0 = track[0]
+            norm_params = chunk_0.normalize_params(self.param_configs)
+            d, f, v = norm_params['d'], norm_params['f'], norm_params['v']
+            ds.append(d)
+            fs.append(f)
+            vs.append(v)
+            ns.append(track.noise_profile.flatten())  # (n_freq_bins,)
+
+        ds, fs, vs = np.array(ds), np.array(fs), np.array(vs)
+        Y = np.stack(ns)  # (n_tracks, n_freq_bins)
+        X = np.column_stack([np.ones_like(ds), ds, fs, vs, ds*vs, ds*fs, fs*vs, ds*fs*vs, vs**2, ds**2, vs**3])
+        y = np.log(Y + 1e-12)
+        self.coeffs, *_ = np.linalg.lstsq(X, y, rcond=None)  # (n_features, n_freq_bins)
+        return self.coeffs
+
+    def predict(self, track):
+        chunk_0 = track[0]
+        norm_params = chunk_0.normalize_params(self.param_configs)
+        d, f, v = norm_params['d'], norm_params['f'], norm_params['v']
+        x = np.array([1, d, f, v, d*v, d*f, f*v, d*f*v, v**2, d**2, v**3])
+        return np.exp(x @ self.coeffs).reshape(-1, 1)  # (n_freq_bins, 1), matches Track.noise_profile shape
+
+    def validate(self, validation_dataset: DataSet):
+        for i, track in enumerate(validation_dataset):
+            predicted_profile = self.predict(track)
+            actual_profile = track.noise_profile
+            abs_err = np.mean(np.abs(predicted_profile - actual_profile))
+            perc_err = np.mean(np.abs((predicted_profile - actual_profile) / (actual_profile + 1e-12)))
+            print(f'MEAN ABS ERR {abs_err:+.3e} MEAN PERC_ERR {perc_err:+06.3f} for {track.get_params()}')
+
+    def cross_validate(self, full_dataset):
+        tracks = full_dataset.tracks
+        for i in range(len(full_dataset.tracks)):
+            print(f'Track {i}')
+            train_tracks = [t for j, t in enumerate(tracks) if j != i]
+            validation_tracks = [tracks[i]]
+            self.fit(train_tracks)
+            self.validate(validation_tracks)
+
+    def save(self, model_output_dir):
+        model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
+        os.makedirs(model_v_output_dir, exist_ok=True)
+        np.savez(
+            f'{model_v_output_dir}/noise_model.npz',
+            coeffs=self.coeffs,
+            silent_lead_in_seconds=self.silent_lead_in_seconds,
+        )
+
+    def load(self, model_path):
+        data = np.load(model_path)
+        self.coeffs = data['coeffs']
+        self.silent_lead_in_seconds = data['silent_lead_in_seconds']
+
+##########################################################################################################################################
+##########################################################################################################################################
+
+
 if __name__ == "__main__":
-    gm = LSGainModel(
+
+    nm = LSNoiseModel(
         param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}
     )
 
@@ -332,27 +406,49 @@ if __name__ == "__main__":
         param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, 
         silent_lead_in_seconds=8.0
     )
-    train_dataset.calculate_noise_profiles()
-    train_dataset.denoise_wet_data()
-    gm.cross_validate(train_dataset)
+    train_dataset.compute_noise_profile()
+    nm.cross_validate(train_dataset)
 
-    gm.save('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model_dn')
+    nm.save('/home/ubuntu/dsp-modeler/black_box/model/models/noise_model')
 
-    gm = LSGainModel() # trained on v>1, d>1
-    # Only one clear outlier: {'d':7,'f':5,'v':3} at 0.0704, +37% over — everything else in the set stays under ±26%.
-    gm.load('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model/2026-08-22_00-24/gain_model.npz')
+    # gm = LSGainModel(
+    #     param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}
+    # )
 
-    train_dataset = DataSet(
-        '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 
-        '/home/ubuntu/dsp-modeler/data/input/input.wav', 
-        '/home/ubuntu/dsp-modeler/data/outputs', 
-        0.03, 
-        param_names=['d', 'f', 'v'], 
-        param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, 
-        silent_lead_in_seconds=8.0
-    )
+    # train_dataset = DataSet(
+    #     '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 
+    #     '/home/ubuntu/dsp-modeler/data/input/input.wav', 
+    #     '/home/ubuntu/dsp-modeler/data/outputs', 
+    #     0.03, 
+    #     param_names=['d', 'f', 'v'], 
+    #     param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, 
+    #     silent_lead_in_seconds=8.0
+    # )
+    # train_dataset.calculate_noise_profiles()
+    # train_dataset.remove_noise()
+    # train_dataset.compute_rms_gain()
+    # gm.cross_validate(train_dataset)
 
-    for track in train_dataset:
-        g = gm.predict(track)
-        rms_w = np.sqrt(np.mean(track.get_wet() ** 2))
-        print(f"{track.get_params()} => {rms_w/g}")
+    # gm.save('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model_dn')
+
+    # gm = LSGainModel() # trained on v>1, d>1
+    # # Only one clear outlier: {'d':7,'f':5,'v':3} at 0.0704, +37% over — everything else in the set stays under ±26%.
+    # gm.load('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model/2026-08-22_00-24/gain_model.npz')
+
+    nm = LSNoiseModel() # trained on v>1, d>1
+    nm.load('/home/ubuntu/dsp-modeler/black_box/model/models/noise_model/2026-08-25_01-10/noise_model.npz')
+
+    # train_dataset = DataSet(
+    #     '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 
+    #     '/home/ubuntu/dsp-modeler/data/input/input.wav', 
+    #     '/home/ubuntu/dsp-modeler/data/outputs', 
+    #     0.03, 
+    #     param_names=['d', 'f', 'v'], 
+    #     param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, 
+    #     silent_lead_in_seconds=8.0
+    # )
+
+    # for track in train_dataset:
+    #     g = gm.predict(track)
+    #     rms_w = np.sqrt(np.mean(track.get_wet() ** 2))
+    #     print(f"{track.get_params()} => {rms_w/g}")

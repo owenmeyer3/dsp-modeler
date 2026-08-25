@@ -73,6 +73,46 @@ def spectral_subtract(signal, noise_profile, sr, nperseg=2048, oversubtract=1.8,
     _, signal_clean = istft(Zxx_clean, fs=sr, nperseg=nperseg)
     return signal_clean
 
+# def spectral_add_noise(signal, noise_profile, sr, nperseg=2048, overadd=1.8, seed=None):
+#     """Synthesize noise matching noise_profile's magnitude spectrum (random
+#     phase, appropriate for stationary analog hiss) and add it to signal.
+#     Not an inverse of spectral_subtract -- that's lossy (the floor-clamp
+#     discards the original magnitude whenever it wins the max()) -- this
+#     just reintroduces plausible noise with the right spectral shape."""
+#     rng = np.random.default_rng(seed)
+#     _, _, Zxx = stft(signal, fs=sr, nperseg=nperseg)
+#     n_frames = Zxx.shape[1]
+
+#     random_phase = rng.uniform(-np.pi, np.pi, size=(noise_profile.shape[0], n_frames))
+#     noise_stft = overadd * noise_profile * np.exp(1j * random_phase)
+#     _, noise_time = istft(noise_stft, fs=sr, nperseg=nperseg)
+
+#     n = min(len(signal), len(noise_time))
+#     return signal[:n] + noise_time[:n]
+
+def spectral_add_noise(signal, noise_profile, sr, nperseg=2048, overadd=1.0, seed=None):
+    """Synthesize noise matching noise_profile's magnitude spectrum (random
+    phase + Rayleigh-distributed per-frame magnitude, matching how a
+    stationary Gaussian noise process's STFT magnitude actually behaves)
+    and add it to signal. `overadd` scales the added noise level relative
+    to the estimated profile -- default 1.0 reproduces the estimated level
+    as-is; useful to dial up/down for debugging.
+    Not an inverse of spectral_subtract -- that's lossy (the floor-clamp
+    discards the original magnitude whenever it wins the max()) -- this
+    just reintroduces plausible noise with the right spectral shape."""
+    rng = np.random.default_rng(seed)
+    _, _, Zxx = stft(signal, fs=sr, nperseg=nperseg)
+    n_frames = Zxx.shape[1]
+
+    sigma = noise_profile / np.sqrt(np.pi / 2)  # Rayleigh scale s.t. mean == noise_profile
+    magnitude = rng.rayleigh(scale=sigma, size=(noise_profile.shape[0], n_frames))
+    random_phase = rng.uniform(-np.pi, np.pi, size=(noise_profile.shape[0], n_frames))
+    noise_stft = overadd * magnitude * np.exp(1j * random_phase)
+
+    _, noise_time = istft(noise_stft, fs=sr, nperseg=nperseg)
+    n = min(len(signal), len(noise_time))
+    return signal[:n] + noise_time[:n]
+
 def _to_lufs(p):
     """K-weighted power -> LUFS (includes BS.1770's -0.691 calibration offset)."""
     return -0.691 + 10 * np.log10(p)

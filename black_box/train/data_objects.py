@@ -1,7 +1,7 @@
 import json, torch, random
 import numpy as np
 from common.utils import load_wav
-from eval.spectral_compare import estimate_noise_profile, spectral_subtract
+from eval.spectral_compare import estimate_noise_profile, spectral_subtract, spectral_add_noise
 from common.delay_ops import measure_delay, apply_shift
 
 def parse_to_subarrays(arr, group_size):
@@ -147,55 +147,57 @@ class Track():
     def get_params(self):
         return self.chunks[0].params
 
+    def wet_to_chunks(self, new_wet, offset = 0):
+        for chunk in self.chunks:
+            n = len(chunk)
+            chunk.wet_data = new_wet[offset:offset + n]
+            offset += n
+
+    def compute_constant_gain(self, gain):
+        self.gain = gain
+        for chunk in self.chunks: chunk.gain = self.gain
+
     def compute_rms_gain(self):
         rms_d = np.sqrt(np.mean(self.get_dry() ** 2))
         rms_w = np.sqrt(np.mean(self.get_wet() ** 2))
-        return rms_w / rms_d
+        self.gain = rms_w / rms_d
+        for chunk in self.chunks: chunk.gain = self.gain
 
     def compute_noise_profile(self, silent_lead_in_seconds=8):
         silence_region = self.get_wet()[:silent_lead_in_seconds*self.sample_rate]
         self.noise_profile = estimate_noise_profile(silence_region, self.sample_rate)
         for chunk in self.chunks: chunk.noise_profile = self.noise_profile
 
+
+
     def compute_model_gain(self, gain_model):
         self.gain=gain_model.predict(self)
         for chunk in self.chunks: chunk.gain = self.gain
 
-    def denoise_wet_data(self):
-        trk_wet_data = spectral_subtract(self.get_wet(), self.noise_profile, self.sample_rate)
-        # re-split back into each chunk's original length
-        offset = 0
-        for chunk in self.chunks:
-            n = len(chunk)
-            chunk.wet_data = trk_wet_data[offset:offset + n]
-            offset += n
+    def compute_model_noise(self, noise_model):
+        self.noise_profile=noise_model.predict(self)
+        for chunk in self.chunks: chunk.noise_profile = self.noise_profile
 
-    def add_model_gain(self):
+
+
+    def add_gain(self):
         trk_wet_data = self.get_wet() / self.gain
-        # re-split back into each chunk's original length
-        offset = 0
-        for chunk in self.chunks:
-            n = len(chunk)
-            chunk.wet_data = trk_wet_data[offset:offset + n]
-            offset += n
+        self.wet_to_chunks(trk_wet_data)
 
-    def inverse_model_gain(self):
+    def add_noise(self):
+        trk_wet_data = spectral_add_noise(self.get_wet(), self.noise_profile, self.sample_rate)
+        self.wet_to_chunks(trk_wet_data)
+
+
+
+    def remove_gain(self):
         trk_wet_data = self.get_wet() * self.gain
-        # re-split back into each chunk's original length
-        offset = 0
-        for chunk in self.chunks:
-            n = len(chunk)
-            chunk.wet_data = trk_wet_data[offset:offset + n]
-            offset += n
+        self.wet_to_chunks(trk_wet_data)
 
-    def add_constant_gain(self, gain):
-        trk_wet_data = self.get_wet() * gain
-        # re-split back into each chunk's original length
-        offset = 0
-        for chunk in self.chunks:
-            n = len(chunk)
-            chunk.wet_data = trk_wet_data[offset:offset + n]
-            offset += n
+    def remove_noise(self):
+        trk_wet_data = spectral_subtract(self.get_wet(), self.noise_profile, self.sample_rate)
+        self.wet_to_chunks(trk_wet_data)
+
 
     @staticmethod
     def from_data(sr, chunk_seconds, params, dry_data=None, wet_data=None):
@@ -223,8 +225,6 @@ class DataSet():
         self.param_names = param_names
         self.param_configs = param_configs
         self.silent_lead_in_seconds = silent_lead_in_seconds
-
-        print("loading dataset")
 
         # Get dry data
         print(f"Load dry: {dry_file}")
@@ -333,22 +333,38 @@ class DataSet():
     def __iter__(self):
         return iter(self.tracks)
 
-    def compute_model_gain(self, gain_model):
+    def compute_constant_gain(self, gain):
         for track in self.tracks:
-            track.compute_model_gain(gain_model)
-
-    def calculate_noise_profiles(self):
-        for track in self.tracks:
-            track.compute_noise_profile()
+            track.compute_model_gain(gain)
 
     def compute_rms_gain(self):
         for track in self.tracks:
             track.compute_rms_gain()
 
-    def denoise_wet_data(self):
+    def compute_noise_profile(self, silent_lead_in_seconds=8):
         for track in self.tracks:
-            track.denoise_wet_data()
+            track.compute_noise_profile(silent_lead_in_seconds=silent_lead_in_seconds)
 
-    def add_model_gain(self):
+    def compute_model_gain(self, gain_model):
         for track in self.tracks:
-            track.add_model_gain()
+            track.compute_model_gain(gain_model)
+
+    def compute_model_noise(self, noise_model):
+        for track in self.tracks:
+            track.compute_model_noise(noise_model)
+
+    def add_gain(self):
+        for track in self.tracks:
+            track.add_gain()
+
+    def add_noise(self):
+        for track in self.tracks:
+            track.add_noise()
+
+    def remove_gain(self):
+        for track in self.tracks:
+            track.remove_gain()
+
+    def remove_noise(self):
+        for track in self.tracks:
+            track.remove_noise()
