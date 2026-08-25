@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 
 from common.delay_ops import measure_delay, apply_shift
 from common.cfg import get_config
-import eval.spectral_compare as sc
+import eval.spectral_compare_db as sc
 
 config = get_config()
 

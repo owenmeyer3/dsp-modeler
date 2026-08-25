@@ -291,12 +291,12 @@ class LSGainModel():
     def validate(self, validation_dataset: DataSet): # validation_dataset is just 1 index array w/ cross val
         for i, track in enumerate(validation_dataset):
             predicted_gain = self.predict(track)
-            actual_gain = track.compute_rms_gain()
+            actual_gain = track.gain
             print(f'ABS ERR {(predicted_gain - actual_gain):+06.3f} PERC_ERR {((predicted_gain-actual_gain) / actual_gain):+06.3f} for {track.get_params()}')
 
     def cross_validate(self, full_dataset):
         tracks = full_dataset.tracks
-        for i in range(len(full_dataset.tracks)):
+        for i in range(len(full_dataset)):
             print(f'Track {i}')
             train_tracks = [t for j,t in enumerate(tracks) if j!=i]
             validation_tracks = [tracks[i]]
@@ -393,12 +393,30 @@ class LSNoiseModel():
 
 if __name__ == "__main__":
 
-    nm = LSNoiseModel(
+    # nm = LSNoiseModel(
+    #     param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}
+    # )
+
+    # train_dataset = DataSet(
+    #     '/home/ubuntu/dsp-modeler/data/outputs/manifest.jsonl', 
+    #     '/home/ubuntu/dsp-modeler/data/input/input.wav', 
+    #     '/home/ubuntu/dsp-modeler/data/outputs', 
+    #     0.03, 
+    #     param_names=['d', 'f', 'v'], 
+    #     param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, 
+    #     silent_lead_in_seconds=8.0
+    # )
+    # train_dataset.compute_noise_profile()
+    # nm.cross_validate(train_dataset)
+
+    # nm.save('/home/ubuntu/dsp-modeler/black_box/model/models/noise_model')
+
+    gm = LSGainModel(
         param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}
     )
 
     train_dataset = DataSet(
-        '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 
+        '/home/ubuntu/dsp-modeler/data/outputs/manifest.jsonl', 
         '/home/ubuntu/dsp-modeler/data/input/input.wav', 
         '/home/ubuntu/dsp-modeler/data/outputs', 
         0.03, 
@@ -407,36 +425,18 @@ if __name__ == "__main__":
         silent_lead_in_seconds=8.0
     )
     train_dataset.compute_noise_profile()
-    nm.cross_validate(train_dataset)
+    train_dataset.remove_noise()
+    train_dataset.compute_rms_gain()
+    gm.cross_validate(train_dataset)
 
-    nm.save('/home/ubuntu/dsp-modeler/black_box/model/models/noise_model')
-
-    # gm = LSGainModel(
-    #     param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}
-    # )
-
-    # train_dataset = DataSet(
-    #     '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 
-    #     '/home/ubuntu/dsp-modeler/data/input/input.wav', 
-    #     '/home/ubuntu/dsp-modeler/data/outputs', 
-    #     0.03, 
-    #     param_names=['d', 'f', 'v'], 
-    #     param_configs={'d':{'min':1, 'max':7, 'dtype':torch.float32},'f':{'min':1, 'max':7, 'dtype':torch.float32},'v':{'min':1, 'max':7, 'dtype':torch.float32}}, 
-    #     silent_lead_in_seconds=8.0
-    # )
-    # train_dataset.calculate_noise_profiles()
-    # train_dataset.remove_noise()
-    # train_dataset.compute_rms_gain()
-    # gm.cross_validate(train_dataset)
-
-    # gm.save('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model_dn')
+    gm.save('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model_dn')
 
     # gm = LSGainModel() # trained on v>1, d>1
     # # Only one clear outlier: {'d':7,'f':5,'v':3} at 0.0704, +37% over — everything else in the set stays under ±26%.
     # gm.load('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model/2026-08-22_00-24/gain_model.npz')
 
-    nm = LSNoiseModel() # trained on v>1, d>1
-    nm.load('/home/ubuntu/dsp-modeler/black_box/model/models/noise_model/2026-08-25_01-10/noise_model.npz')
+    # nm = LSNoiseModel() # trained on v>1, d>1
+    # nm.load('/home/ubuntu/dsp-modeler/black_box/model/models/noise_model/2026-08-25_01-10/noise_model.npz')
 
     # train_dataset = DataSet(
     #     '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 

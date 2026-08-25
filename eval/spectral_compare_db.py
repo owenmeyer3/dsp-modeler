@@ -5,6 +5,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy.io import wavfile
 from scipy import signal
+from scipy.signal import stft, istft
 
 # ---------------------------------------------------------------------------
 # Plain dBFS measurement -- this is the whole "engine" of the script
@@ -50,6 +51,69 @@ def measure_noise_floor(data, sr, duration=8.0):
     lead_in = data[:n_samples]
     powers = block_powers(lead_in, sr)
     return power_to_db(np.mean(powers))
+
+def estimate_noise_profile(noise_sample, sr, nperseg=2048):
+    """Average magnitude spectrum from a known-silent region -- the
+    noise's own frequency-domain fingerprint, across the whole spectrum,
+    not just a single band.
+    n_freq_bins = nperseg // 2 + 1
+    """
+    _, _, Zxx = stft(noise_sample, fs=sr, nperseg=nperseg)
+    return np.mean(np.abs(Zxx), axis=1, keepdims=True)  # (n_freq_bins, 1)
+
+def spectral_subtract(signal, noise_profile, sr, nperseg=2048, oversubtract=1.8, floor=0.02):
+    """Subtract the estimated noise magnitude from signal's STFT, bin by
+    bin, then reconstruct. Appropriate for stationary, non-repeating
+    (random) analog noise -- unlike time-domain subtraction, which only
+    works if the noise repeats exactly sample-for-sample, which real
+    analog hiss doesn't."""
+    _, _, Zxx = stft(signal, fs=sr, nperseg=nperseg)
+    mag, phase = np.abs(Zxx), np.angle(Zxx)
+    mag_clean = np.maximum(mag - oversubtract * noise_profile, floor * mag)
+    Zxx_clean = mag_clean * np.exp(1j * phase)
+    _, signal_clean = istft(Zxx_clean, fs=sr, nperseg=nperseg)
+    return signal_clean
+
+def spectral_add_noise(signal, noise_profile, sr, nperseg=2048, overadd=1.8, seed=None):
+    """Synthesize noise matching noise_profile's magnitude spectrum (random
+    phase, appropriate for stationary analog hiss) and add it to signal.
+    Not an inverse of spectral_subtract -- that's lossy (the floor-clamp
+    discards the original magnitude whenever it wins the max()) -- this
+    just reintroduces plausible noise with the right spectral shape."""
+    rng = np.random.default_rng(seed)
+    _, _, Zxx = stft(signal, fs=sr, nperseg=nperseg)
+    n_frames = Zxx.shape[1]
+
+    random_phase = rng.uniform(-np.pi, np.pi, size=(noise_profile.shape[0], n_frames))
+    noise_stft = overadd * noise_profile * np.exp(1j * random_phase)
+    _, noise_time = istft(noise_stft, fs=sr, nperseg=nperseg)
+
+    n = min(len(signal), len(noise_time))
+    return signal[:n] + noise_time[:n]
+
+# def spectral_add_noise(signal, noise_profile, sr, nperseg=2048, overadd=1.0, seed=None):
+#     """Synthesize noise matching noise_profile's magnitude spectrum (random
+#     phase + Rayleigh-distributed per-frame magnitude, matching how a
+#     stationary Gaussian noise process's STFT magnitude actually behaves)
+#     and add it to signal. `overadd` scales the added noise level relative
+#     to the estimated profile -- default 1.0 reproduces the estimated level
+#     as-is; useful to dial up/down for debugging.
+#     Not an inverse of spectral_subtract -- that's lossy (the floor-clamp
+#     discards the original magnitude whenever it wins the max()) -- this
+#     just reintroduces plausible noise with the right spectral shape."""
+#     rng = np.random.default_rng(seed)
+#     _, _, Zxx = stft(signal, fs=sr, nperseg=nperseg)
+#     n_frames = Zxx.shape[1]
+
+#     sigma = noise_profile / np.sqrt(np.pi / 2)  # Rayleigh scale s.t. mean == noise_profile
+#     magnitude = rng.rayleigh(scale=sigma, size=(noise_profile.shape[0], n_frames))
+#     random_phase = rng.uniform(-np.pi, np.pi, size=(noise_profile.shape[0], n_frames))
+#     noise_stft = overadd * magnitude * np.exp(1j * random_phase)
+
+#     _, noise_time = istft(noise_stft, fs=sr, nperseg=nperseg)
+#     n = min(len(signal), len(noise_time))
+#     return signal[:n] + noise_time[:n]
+
 
 # ---------------------------------------------------------------------------
 # Plots

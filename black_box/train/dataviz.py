@@ -260,14 +260,14 @@ if __name__ == '__main__':
     noise_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/noise_model/2026-08-25_01-10/noise_model.npz')
 
     example_dataset = DataSet(
-        '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 
+        '/home/ubuntu/dsp-modeler/data/outputs/manifest.jsonl', 
         '/home/ubuntu/dsp-modeler/data/input/input.wav', 
         '/home/ubuntu/dsp-modeler/data/outputs', 
         chunk_seconds, 
         param_names, 
         param_configs, 
         silent_lead_in_seconds=silent_lead_in_seconds, 
-        dbg_tracks = [0]
+        dbg_tracks = [2]
     )
     print(example_dataset.tracks)
     for trk in example_dataset:
@@ -292,8 +292,8 @@ if __name__ == '__main__':
     trk_p = model.predict_track(trk_f, device, param_names, param_configs, chunk_seconds)#, out_path='/home/ubuntu/dsp-modeler/data/predictions/p.wav')
     trk_p.compute_model_gain(gain_model) # gain for these params
     trk_p.remove_gain()
-    trk_p.compute_model_noise(noise_model) # gain for these params
-    trk_p.add_noise()
+    # trk_p.compute_model_noise(noise_model) # gain for these params
+    # trk_p.add_noise()
 
     write_wav('/home/ubuntu/dsp-modeler/data/predictions/p.wav', trk_p.get_wet(), 96000)
 
@@ -304,9 +304,7 @@ if __name__ == '__main__':
     ]
     print_track_section(waves, 1, 5, zoom_start_s=2, zoom_len=0.15,title="Silence", out_path='/home/ubuntu/dsp-modeler/black_box/train/viz/test_sln.png')
     print_track_section(waves, 155, 165, zoom_start_s=155, zoom_len=0.15,title="Sound", out_path='/home/ubuntu/dsp-modeler/black_box/train/viz/test.png')
-    # print(f'trk {mod_trk.get_wet().shape}')
-    # print(f'trk_p {trk_p.get_wet().shape}')
-    serieses = {'wet': trk.get_wet(), 'trk_p': trk_p.get_wet()}
 
+    serieses = {'wet': trk.get_wet(), 'trk_p': trk_p.get_wet()}
     plot_average_spectrum(serieses, 96000, f'/home/ubuntu/dsp-modeler/black_box/train/viz/eval_db_spectrum_sln.png', start_seconds=1)
     plot_average_spectrum(serieses, 96000, f'/home/ubuntu/dsp-modeler/black_box/train/viz/eval_db_spectrum.png', start_seconds=155)

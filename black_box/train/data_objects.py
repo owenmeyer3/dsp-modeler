@@ -1,7 +1,7 @@
 import json, torch, random
 import numpy as np
 from common.utils import load_wav
-from eval.spectral_compare import estimate_noise_profile, spectral_subtract, spectral_add_noise
+from eval.spectral_compare_db import estimate_noise_profile, spectral_subtract, spectral_add_noise
 from common.delay_ops import measure_delay, apply_shift
 
 def parse_to_subarrays(arr, group_size):
