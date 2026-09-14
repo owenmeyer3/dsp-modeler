@@ -1,23 +1,10 @@
-import torch, datetime, copy, os
+import torch, datetime, copy, os, json, time
 import torch.optim as optim
 import numpy as np
-from scipy.stats import skew
-from model_objects import ConditionedLSTM, combined_loss, LSGainModel
+from model_objects import ConditionedLSTM, combined_loss, get_skew, LSGainModel
 from data_objects import DataSet
 from eval.plot_waves import plot_waveforms
 
-def get_symmetry(x):
-    x = x.flatten()
-    pos = x[x > 0]
-    neg = x[x < 0]
-    pos_rms = np.sqrt(np.mean(pos**2)) if len(pos) else 0
-    neg_rms = np.sqrt(np.mean(neg**2)) if len(neg) else 0
-    p99_9 = np.percentile(x, 99.9)
-    p0_1 = np.percentile(x, 0.1)
-    skewness = skew(x)
-    pn_rms = pos_rms/neg_rms
-    p999Overp001 = p99_9/abs(p0_1)
-    return [skewness, pn_rms, p999Overp001]
 
 def train_manifest(
     train_dataset,
@@ -37,16 +24,20 @@ def train_manifest(
     lr_factor = 0.5,
     batch_size=30,
     hidden_size=20,
-    verbose_time=False,
-    verbose_performance = False
+    num_layers=1,
+    verbose_time=False
 ):
     # Make out path
     start = datetime.datetime.now()
     model_v_output_dir = f'{model_output_dir}/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")}'
     os.makedirs(model_v_output_dir, exist_ok=True)
 
+    # Save track info
+    if train_dataset:
+        train_dataset.save_manifest_info(f"{model_v_output_dir}/train_manifest.jsonl")
+
     # Model info
-    model = ConditionedLSTM(input_size=len(param_names) + 1, hidden_size=hidden_size).to(device)
+    model = ConditionedLSTM(input_size=len(param_names) + 1, hidden_size=hidden_size, num_layers=num_layers).to(device)
     # model.lstm.flatten_parameters()                                 < =======================================
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     prepped = datetime.datetime.now()
@@ -58,34 +49,42 @@ def train_manifest(
     print("EPOCH |    total     esr        dc     pos neg |     mean      std      skew   |    mean       std      skew")
 
 
-    train_denoised = True
-
     for epoch in range(epochs):
         e_time = datetime.datetime.now()
 
         # Training
         model.train()
-        
-        for batch in train_dataset.batches_of_random(): # batched segments of no specified track or ts
-            features_tensors = batch.get_features_tensor(device, param_names, param_configs)
-            target_tensors = batch.get_target_tensor(device)
 
-            # gains = batch.get_gains_tensor(device, param_names)
-            # features_tensors = features_tensors * gains
+        # Per Track group
+        for track_group_batches in train_dataset.make_window_batches(batch_size=batch_size):
+            train_states = None
+            for b_i, batch in enumerate(track_group_batches):
 
-            pred_tensors, _ = model(features_tensors, None) # torch.Size([30, 57600, 1])
+                features_tensors = batch.get_features_tensor(device, param_names, param_configs)
+                target_tensors = batch.get_target_tensor(device)
+                # gains = batch.get_gains_tensor(device, param_names)
+                # features_tensors = features_tensors * gains
 
-            # pred_tensors = pred_tensors / gains
+                pred_tensors, train_states = model(features_tensors, train_states)
+                # pred_tensors = pred_tensors / gains
 
-            pred_for_loss = pred_tensors[:, warmup_samples:, :]
-            target_for_loss = target_tensors[:, warmup_samples:, :]
-            loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, batch_size, dc_weight=0.5, pos_neg_weight=0.2)
+                train_states = tuple(s.detach() for s in train_states)  # truncate BPTT, don't backprop through the whole track
 
-            # Backprop
-            optimizer.zero_grad() # clear old gradients
-            loss.backward() # compute fresh gradients for this accumulated window only
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
-            optimizer.step() # apply them to the weights
+                if b_i == 0:
+                    pred_for_loss = pred_tensors[:, warmup_samples:, :]
+                    target_for_loss = target_tensors[:, warmup_samples:, :]
+                else:
+                    pred_for_loss = pred_tensors
+                    target_for_loss = target_tensors
+                    
+                loss, _, _, _ = combined_loss(pred_for_loss, target_for_loss, esr_weight = 2, dc_weight=1, pos_neg_weight=0, local_rms_weight=3)
+
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # cap their magnitude
+                optimizer.step()
+
+
 
         t_time =  datetime.datetime.now()
         if verbose_time: print(f"Train time: {t_time - e_time}")
@@ -98,18 +97,24 @@ def train_manifest(
             eval_targets = [[] for _ in range(num_tracks)]
 
             # Per Track group
-            batch_groups = validation_dataset.make_window_batches(batch_size=batch_size)
-            for g_i, batch_group in enumerate(batch_groups):
+            for g_i, track_group_batches in enumerate(validation_dataset.make_window_batches(batch_size=batch_size)):
                 eval_states = None
-                for batch in batch_group:
+                for b_i, batch in enumerate(track_group_batches):
 
                     features_tensors = batch.get_features_tensor(device, param_names, param_configs)
-                    # gains = batch.get_gains_tensor(device, param_names)
                     target_tensors = batch.get_target_tensor(device)
-
+                    # gains = batch.get_gains_tensor(device, param_names)
                     # features_tensors = features_tensors * gains
+                    
                     pred_tensors, eval_states = model(features_tensors, eval_states)
                     # pred_tensors = pred_tensors / gains
+
+                    if b_i == 0:
+                        pred_for_loss = pred_tensors[:, warmup_samples:, :]
+                        target_for_loss = target_tensors[:, warmup_samples:, :]
+                    else:
+                        pred_for_loss = pred_tensors
+                        target_for_loss = target_tensors
 
                     # Save pred, tgt in memory structure
                     for t_i, track in enumerate(batch):
@@ -122,23 +127,19 @@ def train_manifest(
 
 
         # Validation
-            eval_losss = eval_esrs = eval_dcs = eval_pns = pSkewnesss = pPn_rmss = pP999Overp001s = tSkewnesss = tPn_rmss = tP999Overp001s = pMeans = pStds = tMeans = tStds = 0.0
+
+            eval_losss, eval_esrs, eval_dcs, eval_pns, pSkewnesss, tSkewnesss, pMeans, pStds, tMeans, tStds = [0.0]*10
+
             for p in range(num_tracks):
                 eval_pred_p = torch.cat(eval_preds[p], dim=1)
                 eval_target_p = torch.cat(eval_targets[p], dim=1)
-                eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred_p, eval_target_p, batch_size, dc_weight=0.5, pos_neg_weight=0.2)
+                eval_loss, eval_esr, eval_dc, eval_pn = combined_loss(eval_pred_p, eval_target_p, esr_weight = 2, dc_weight=1, pos_neg_weight=0, local_rms_weight=3)
                 eval_losss += eval_loss.item()
                 eval_esrs += eval_esr.item()
                 eval_dcs += eval_dc.item()
                 eval_pns += eval_pn.item()
-                pSkewness, pPn_rms, pP999Overp001 = get_symmetry(eval_pred_p.detach().cpu().numpy())
-                pSkewnesss += pSkewness
-                pPn_rmss += pPn_rms
-                pP999Overp001s += pP999Overp001
-                tSkewness, tPn_rms, tP999Overp001 = get_symmetry(eval_target_p.detach().cpu().numpy())
-                tSkewnesss += tSkewness
-                tPn_rmss += tPn_rms
-                tP999Overp001s += tP999Overp001
+                pSkewnesss += get_skew(eval_pred_p)
+                tSkewnesss += get_skew(eval_target_p)
                 pMeans += eval_pred_p.mean().item()
                 pStds += eval_pred_p.std().item()
                 tMeans += eval_target_p.mean().item()
@@ -158,6 +159,9 @@ def train_manifest(
         v_time =  datetime.datetime.now()
         if verbose_time: print(f"Validation time: {v_time - p_time}")
 
+        # Save intermediate model
+        if epoch % 10 == 0:
+            torch.save(model.state_dict(), f'{model_v_output_dir}/model_int_{epoch}.pt')
 
         # Reset model if diverging and lower learning rate
         if eval_loss < best_loss:
@@ -192,28 +196,52 @@ if __name__ == '__main__':
         'f':{'min':1, 'max':7, 'dtype':torch.float32},
         'v':{'min':1, 'max':7, 'dtype':torch.float32},
     }
-    chunk_seconds=0.03
+    # chunk_seconds=0.03
+    chunk_seconds=0.3
     silent_lead_in_seconds=8
 
+    # training_set = DataSet(
+    #     '/home/ubuntu/dsp-modeler/data/outputs/odds.jsonl', 
+    #     '/home/ubuntu/dsp-modeler/data/input/input.wav', 
+    #     '/home/ubuntu/dsp-modeler/data/outputs', 
+    #     chunk_seconds, 
+    #     param_names, 
+    #     param_configs, 
+    #     silent_lead_in_seconds=silent_lead_in_seconds,
+    #     dbg_tracks = [40]
+    # )
 
-    gain_model = LSGainModel() # trained on v>1, d>1
-    # Only one clear outlier: {'d':7,'f':5,'v':3} at 0.0704, +37% over — everything else in the set stays under ±26%.
-    gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/ls_gain_model/2026-08-22_00-24/gain_model.npz')
-
+    ### MULTI ###
     training_set = DataSet(
-        '/home/ubuntu/dsp-modeler/data/outputs/manifest_dv3_plus.jsonl', 
+        '/home/ubuntu/dsp-modeler/data/outputs/odds.jsonl', 
         '/home/ubuntu/dsp-modeler/data/input/input.wav', 
         '/home/ubuntu/dsp-modeler/data/outputs', 
         chunk_seconds, 
         param_names, 
         param_configs, 
-        silent_lead_in_seconds=silent_lead_in_seconds    
+        silent_lead_in_seconds=silent_lead_in_seconds,
+        #dbg_tracks = list(range(30))
     )
+
+    # remove silent track
+    org_trks = len(training_set)
+    training_set.tracks = [t for t in training_set.tracks if t.is_audible()]
+    training_set.tracks = training_set.tracks[:30]
+    print(f"Removed {org_trks - len(training_set)} silent tracks")
+
+
     print('LOADED')
-    training_set.calculate_noise_profiles()
-    training_set.denoise_wet_data()
-    training_set.compute_model_gain(gain_model)
-    training_set.add_model_gain()
+
+    # remove noise
+    training_set.compute_noise_profile()
+    training_set.remove_noise()
+
+    # apply gain
+    # gain_model = LSGainModel() # trained on v>1, d>1
+    # gain_model.load('/home/ubuntu/dsp-modeler/black_box/model/models/gain_model/2026-09-12_14-40/gain_model.npz')
+    # training_set.compute_model_gain(gain_model)
+    # training_set.add_model_gain()
+
     print('PROCESSED')
     # validation_set = DataSet(
     #     '/home/ubuntu/dsp-modeler/black_box/data/train/validation.jsonl', 
@@ -247,7 +275,12 @@ if __name__ == '__main__':
         lr_patience = 6,
         lr_factor = 0.5,
         batch_size=30,
-        hidden_size=20,
-        verbose_time=True,
-        verbose_performance = False
+        hidden_size=40,
+        num_layers=3,
+        verbose_time=True
     )
+
+    # 9/12
+    # training on audible tracks only
+    # running with denoised wet data (compute_noise_profile). should evaluate vs denoised wet data.
+    # no gain considered

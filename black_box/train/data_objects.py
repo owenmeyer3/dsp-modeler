@@ -1,7 +1,7 @@
 import json, torch, random
 import numpy as np
 from common.utils import load_wav
-from eval.spectral_compare_db import estimate_noise_profile, spectral_subtract, spectral_add_noise
+from eval.spectral_compare_db import estimate_noise_profile, spectral_subtract, spectral_add_noise, is_track_audible
 from common.delay_ops import measure_delay, apply_shift
 
 def parse_to_subarrays(arr, group_size):
@@ -153,6 +153,9 @@ class Track():
             chunk.wet_data = new_wet[offset:offset + n]
             offset += n
 
+    def is_audible(self, silent_lead_in_seconds=8.0, active_percentile=99, snr_threshold_db=20.0, min_active_db=-60.0):
+        return is_track_audible(self.get_wet(), self.sample_rate, silent_lead_in_seconds, active_percentile, snr_threshold_db=snr_threshold_db, min_active_db=min_active_db)
+
     def compute_constant_gain(self, gain):
         self.gain = gain
         for chunk in self.chunks: chunk.gain = self.gain
@@ -295,9 +298,9 @@ class DataSet():
         # T_4 [t0][t1][t2]
         # T_4 [  ][  ][  ]
         batch_groups=[]
-        for track_group in parse_to_subarrays(self.tracks, batch_size):
+        for track_group in parse_to_subarrays(self.tracks, batch_size): # each group of tracks
             batches=[]
-            for s in range(len(track_group[0])): # for t
+            for s in range(len(track_group[0])): # [amp] @ t_x of tracks in track group
                 batches.append(Batch([track[s] for track in track_group] , tag='window'))
             batch_groups.append(batches)
         return batch_groups
@@ -320,7 +323,14 @@ class DataSet():
         for batch_chunks in parse_to_subarrays(chunks, batch_size):
             batches.append(Batch(batch_chunks, tag='random'))
         return batches
-    
+
+    def save_manifest_info(self, file): # "{model_v_output_dir}/train_manifest.jsonl"
+        # Save track info
+        with open(file, "a") as f:
+            for track in self:
+                line = {"id":track.id, "params":track.get_params()}
+                f.write(json.dumps(line) + "\n")
+
     def __len__(self):
         return len(self.tracks)
 
